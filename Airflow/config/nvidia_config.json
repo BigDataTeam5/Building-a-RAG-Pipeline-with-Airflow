@@ -1,0 +1,18 @@
+{
+  "AWS_CONN_ID": "aws_default",
+  "BUCKET_NAME": "rag-pipeline-with-airflow ",
+  "TEMP_DATA_FOLDER": "/opt/airflow/temp_data",
+  "S3_BASE_FOLDER": "sec_raw_data",
+  "BASE_URL": "https://investor.nvidia.com/financial-info/quarterly-results/default.aspx",
+  "default_args": {
+    "owner": "airflow",
+    "depends_on_past": false,
+    "start_date": "2024-01-01",
+    "retries": 1,
+    "retry_delay": "00:01:00"
+  },
+  "USER_AGENTS": [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/110.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/108.0.0.0 Safari/537.36"
+  ]
+}
