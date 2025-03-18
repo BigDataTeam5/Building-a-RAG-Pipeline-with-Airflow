@@ -9,6 +9,24 @@ from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.chrome.options import Options
 from webdriver_manager.chrome import ChromeDriverManager
+from airflow.hooks.base import BaseHook
+import json
+# Load configuration from JSON file
+with open('/opt/airflow/config/sec_config.json') as config_file:
+    config = json.load(config_file)
+
+# S3 Configuration
+# Fetch AWS credentials from Airflow connection
+AWS_CONN_ID = config['AWS_CONN_ID']
+aws_creds = BaseHook.get_connection(AWS_CONN_ID)
+BUCKET_NAME = config['BUCKET_NAME']
+AWS_ACCESS_KEY = aws_creds.login  # AWS Key
+AWS_SECRET_KEY = aws_creds.password  # AWS Secret
+S3_BASE_FOLDER = config['S3_BASE_FOLDER']
+
+TEMP_DATA_FOLDER = config['TEMP_DATA_FOLDER']
+BASE_URL = config['BASE_URL']
+USER_AGENTS = config['USER_AGENTS']
 
 
 def get_nvidia_quarterly_reports(year="2022"):

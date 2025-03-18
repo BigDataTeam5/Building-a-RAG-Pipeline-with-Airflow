@@ -2,8 +2,9 @@
   "AWS_CONN_ID": "aws_default",
   "BUCKET_NAME": "rag-pipeline-with-airflow ",
   "TEMP_DATA_FOLDER": "/opt/airflow/temp_data",
-  "S3_BASE_FOLDER": "sec_raw_data",
-  "BASE_URL": "https://investor.nvidia.com/financial-info/quarterly-results/default.aspx",
+  "S3_BASE_FOLDER": "nvidia_quarterly_reports",
+  "BASE_URL": "https://investor.nvidia.com/financial-info/financial-reports/default.aspx",
+  "RESULTS_FOLDER": "/opt/airflow/data/nvidia",
   "default_args": {
     "owner": "airflow",
     "depends_on_past": false,
