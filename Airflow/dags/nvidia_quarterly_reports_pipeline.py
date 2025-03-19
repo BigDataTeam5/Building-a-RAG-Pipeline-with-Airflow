@@ -26,6 +26,7 @@ from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait, Select
 from selenium.webdriver.support import expected_conditions as EC
+from selenium.common.exceptions import TimeoutException, NoSuchElementException
 from webdriver_manager.chrome import ChromeDriverManager
 from selenium.webdriver.chrome.options import Options
 from airflow.providers.http.operators.http import SimpleHttpOperator
@@ -43,7 +44,7 @@ AWS_SECRET_KEY = aws_creds.password  # AWS Secret
 S3_BASE_FOLDER = config['S3_BASE_FOLDER']
 RESULTS_FOLDER = config['RESULTS_FOLDER']
 TEMP_DATA_FOLDER = config['TEMP_DATA_FOLDER']
-BASE_URL = config['BASE_URL']
+BASE_URL = config['BASE_URL']  # Keep original BASE_URL from config
 USER_AGENTS = config['USER_AGENTS']
 # =========================
 # DAG DEFAULT ARGS
@@ -62,7 +63,7 @@ default_args = {
 DOWNLOAD_FOLDER = os.path.join(TEMP_DATA_FOLDER, "downloads")
 ROOT_FOLDER = os.path.join(TEMP_DATA_FOLDER, "nvidia_quarterly_report")  # Main folder
 YEAR_FOLDER = os.path.join(ROOT_FOLDER, "2024")  # Year subfolder
-
+# Remove the line that appends "/financials" to BASE_URL
 dag = DAG(
     "nvidia_quarterly_reports_pipeline",
     default_args=default_args,
@@ -89,12 +90,13 @@ def wait_for_downloads(download_folder, timeout=60):
     print("❌ Timeout: downloads did not complete.")
     return False
 
-def get_nvidia_quarterly_links(year='2024'):
+def get_nvidia_quarterly_links(year):
     """
-    Enhanced function that specifically targets official Form 10-Q/10-K documents.
+    Enhanced function that extracts quarterly reports from NVIDIA's quarterly results page.
     Returns a dictionary of quarterly report URLs for seamless integration with download_report.
     """
     print(f"Using URL: {BASE_URL}")
+    print(f"Getting quarterly links for year: {year}")
     
     # Ensure results directory exists
     os.makedirs(RESULTS_FOLDER, exist_ok=True)
@@ -125,101 +127,200 @@ def get_nvidia_quarterly_links(year='2024'):
         with open('/opt/airflow/logs/nvidia_page_source.html', 'w', encoding='utf-8') as f:
             f.write(driver.page_source)
         driver.save_screenshot('/opt/airflow/logs/nvidia_financial_page.png')
-        
-        # Execute JavaScript to navigate to year 2024 (slide index 3)
-        try:
-            driver.execute_script("""
-                // Try to activate the 2024 slider (4th slide, index 3)
-                let slickSlider = document.querySelector('.module-financial-table_body-year-container');
-                if (slickSlider && typeof slickSlider.slick === 'function') {
-                    slickSlider.slick.slickGoTo(3);
-                }
-            """)
-            print("Executed JavaScript to navigate to 2024 slide")
-            time.sleep(2)  # Wait for slide transition
-        except Exception as e:
-            print(f"JavaScript navigation failed: {str(e)}, continuing with direct element selection")
 
-        # Look for the Form 10-Q/Form 10-K section
-        print("Looking for Form 10-Q/Form 10-K section in the financial tables...")
-        
-        # Find the table row that contains "Form 10-Q/Form 10-K"
-        form_sections = driver.find_elements(By.XPATH, "//div[contains(@class, 'module-financial-table_body-row') and contains(., 'Form 10-Q/Form 10-K')]")
-        
-        if form_sections:
-            print(f"Found {len(form_sections)} Form 10-Q/Form 10-K sections")
+        # Select the year from the dropdown first
+        try:
+            # Find and select the appropriate year from the dropdown
+            year_dropdown = driver.find_element(By.ID, "_ctrl0_ctl75_selectEvergreenFinancialAccordionYear")
+            print(f"Found year dropdown: {year_dropdown.get_attribute('outerHTML')[:100]}")
             
-            # Within this section, find the 2024 slide (data-slick-index="3")
-            for section in form_sections:
+            # Create a Select object to interact with the dropdown
+            year_select = Select(year_dropdown)
+            
+            # Select the target year
+            year_select.select_by_value(str(year))
+            print(f"Selected year {year} from dropdown")
+            time.sleep(3)  # Wait for page to update
+            
+            # Save updated page after year selection
+            driver.save_screenshot(f'/opt/airflow/logs/nvidia_after_year_selection_{year}.png')
+            
+            # Find all accordion sections for the selected year
+            accordion_items = driver.find_elements(By.XPATH, "//div[contains(@class, 'evergreen-accordion-item')]")
+            print(f"Found {len(accordion_items)} accordion items")
+            
+            # Process each quarter's accordion section
+            for item in accordion_items:
+                # Get the quarter title
+                title_element = item.find_element(By.XPATH, ".//span[contains(@class, 'evergreen-accordion-title')]")
+                quarter_title = title_element.text
+                print(f"Processing accordion: {quarter_title}")
+                
+                # Determine which quarter (Q1, Q2, Q3, Q4)
+                quarter = None
+                if "First Quarter" in quarter_title:
+                    quarter = "Q1"
+                elif "Second Quarter" in quarter_title:
+                    quarter = "Q2"
+                elif "Third Quarter" in quarter_title:
+                    quarter = "Q3"
+                elif "Fourth Quarter" in quarter_title:
+                    quarter = "Q4"
+                
+                if not quarter:
+                    print(f"Could not determine quarter from title: {quarter_title}")
+                    continue
+                
+                # Find 10-Q or 10-K links within this accordion section
                 try:
-                    # Look for the 2024 slide within this section
-                    year_slide = section.find_element(By.XPATH, ".//div[@data-slick-index='3' and contains(@class, 'slick-slide')]")
-                    print("Found 2024 slide in Form 10-Q/Form 10-K section")
+                    # First ensure the accordion is expanded
+                    toggle_button = item.find_element(By.XPATH, ".//button[contains(@class, 'evergreen-financial-accordion-toggle')]")
+                    if "aria-expanded" not in toggle_button.get_attribute("outerHTML") or toggle_button.get_attribute("aria-expanded") == "false":
+                        toggle_button.click()
+                        time.sleep(1)  # Wait for expansion
                     
-                    # Find all links with the specific class 'module-financial-table_link Form 10-Q/Form 10-K'
-                    links = year_slide.find_elements(By.XPATH, ".//a[contains(@class, 'module-financial-table_link')]")
+                    # Updated XPath selector to match the exact HTML structure
+                    links = item.find_elements(By.XPATH, ".//a[contains(@class, 'evergreen-financial-accordion-link') and contains(@class, 'evergreen-link--text-with-icon') and (contains(., '10-Q') or contains(., '10-K'))]")
                     
-                    if links:
-                        print(f"Found {len(links)} official Form 10-Q/10-K links in the 2024 slide")
+                    print(f"Found {len(links)} potential 10-Q/10-K links in {quarter_title}")
+                    
+                    # If no links found with specific approach, try a more general selector
+                    if not links:
+                        links = item.find_elements(By.XPATH, ".//a[contains(@class, 'evergreen-financial-accordion-link')]")
+                        print(f"Found {len(links)} links with general selector")
+                    
+                    for link in links:
+                        href = link.get_attribute("href")
+                        link_html = link.get_attribute("outerHTML")
+                        text = link.text.strip()
                         
-                        # Process each link to determine which quarter it belongs to
-                        for link in links:
-                            href = link.get_attribute("href")
-                            text = link.text.strip()
+                        print(f"Examining link: Text=[{text}], href=[{href}]")
+                        print(f"Link HTML (preview): {link_html[:200]}...")
+                        
+                        # Check link text for '10-Q' or '10-K' using span elements
+                        link_text_elements = link.find_elements(By.XPATH, ".//span[@class='evergreen-link-text evergreen-financial-accordion-link-text']")
+                        for text_element in link_text_elements:
+                            element_text = text_element.text.strip()
+                            print(f"Found link text element: {element_text}")
                             
-                            if not href or not href.endswith(".pdf"):
-                                continue
-                                
-                            print(f"Processing link: {text} - {href}")
-                            
-                            # Determine quarter from the link text or URL
-                            quarter = None
-                            if text.startswith("Q1"):
-                                quarter = "Q1"
-                            elif text.startswith("Q2"):
-                                quarter = "Q2"
-                            elif text.startswith("Q3"):
-                                quarter = "Q3"
-                            elif text.startswith("Q4"):
-                                quarter = "Q4"
-                                
-                            # If we can't determine from text, use URL path
-                            if not quarter:
-                                if "/q1/" in href.lower():
-                                    quarter = "Q1"
-                                elif "/q2/" in href.lower():
-                                    quarter = "Q2"
-                                elif "/q3/" in href.lower():
-                                    quarter = "Q3"
-                                elif "/q4/" in href.lower():
-                                    quarter = "Q4"
-                            
-                            if quarter:
-                                # Skip files that are clearly supplementary
-                                if ("commentary" in href.lower() or 
-                                    "presentation" in href.lower() or 
-                                    "trend" in href.lower()):
-                                    print(f"Skipping supplementary document: {href}")
-                                    continue
-                                    
-                                # Add to our results - maintain the expected list format
-                                if quarter not in quarterly_reports:
-                                    quarterly_reports[quarter] = []
-                                quarterly_reports[quarter].append(href)
-                                print(f"✅ Found official {quarter} document: {href}")
-                                
+                            if "10-Q" in element_text or "10-K" in element_text:
+                                if href and href.endswith(".pdf"):
+                                    if quarter not in quarterly_reports:
+                                        quarterly_reports[quarter] = []
+                                    quarterly_reports[quarter].append(href)
+                                    print(f"✅ Added {quarter} document for {year}: {href}")
+                                    break  # Take only the first 10-Q/10-K link per quarter
+                
                 except Exception as e:
-                    print(f"Error processing Form 10-Q/Form 10-K section: {str(e)}")
+                    print(f"Error finding 10-Q/10-K links in {quarter_title}: {str(e)}")
         
-       
-        print(f"Final quarterly reports: {quarterly_reports}")
+        except Exception as e:
+            print(f"Error selecting year {year} from dropdown: {str(e)}")
+            
+        # If no reports found, try alternative approach - look directly for PDF links with correct patterns
+        if not quarterly_reports:
+            print(f"No quarterly reports found using dropdown approach, trying direct link search...")
+            
+            try:
+                # Find all PDF links on the page
+                pdf_links = driver.find_elements(By.XPATH, "//a[contains(@href, '.pdf')]")
+                
+                for link in pdf_links:
+                    href = link.get_attribute("href")
+                    text = link.text.strip()
+                    
+                    # Check if this is a 10-Q/10-K report for the current year
+                    if href and str(year) in href and ("10-Q" in text or "10-K" in text):
+                        # Determine the quarter
+                        quarter = None
+                        if "Q1" in href or "First Quarter" in text:
+                            quarter = "Q1"
+                        elif "Q2" in href or "Second Quarter" in text:
+                            quarter = "Q2"
+                        elif "Q3" in href or "Third Quarter" in text:
+                            quarter = "Q3"
+                        elif "Q4" in href or "Fourth Quarter" in text:
+                            quarter = "Q4"
+                        
+                        # If we can't determine from text, use URL
+                        if not quarter:
+                            if "/q1/" in href.lower():
+                                quarter = "Q1"
+                            elif "/q2/" in href.lower():
+                                quarter = "Q2"
+                            elif "/q3/" in href.lower():
+                                quarter = "Q3"
+                            elif "/q4/" in href.lower():
+                                quarter = "Q4"
+                        
+                        if quarter:
+                            if quarter not in quarterly_reports:
+                                quarterly_reports[quarter] = []
+                            quarterly_reports[quarter].append(href)
+                            print(f"✅ Added {quarter} document for {year} through direct search: {href}")
+            
+            except Exception as e:
+                print(f"Error in direct link search approach: {str(e)}")
+                
+        print(f"Final quarterly reports for {year}: {quarterly_reports}")
         return quarterly_reports
     
     except Exception as e:
-        print(f"❌ Error in scraping NVIDIA reports: {str(e)}")
+        print(f"❌ Error in scraping NVIDIA reports for {year}: {str(e)}")
+        return {}
     
     finally:
         driver.quit()
+
+def process_links(links, quarterly_reports, year):
+    """Helper function to process links and add them to quarterly_reports dictionary"""
+    for link in links:
+        try:
+            href = link.get_attribute("href")
+            text = link.text.strip()
+            
+            if not href or not href.endswith(".pdf"):
+                continue
+                
+            print(f"Processing link: {text} - {href}")
+            
+            # Determine quarter from the link text or URL
+            quarter = None
+            if text.startswith("Q1") or "Q1" in text:
+                quarter = "Q1"
+            elif text.startswith("Q2") or "Q2" in text:
+                quarter = "Q2"
+            elif text.startswith("Q3") or "Q3" in text:
+                quarter = "Q3"
+            elif text.startswith("Q4") or "Q4" in text:
+                quarter = "Q4"
+                
+            # If we can't determine from text, use URL path
+            if not quarter:
+                if "/q1/" in href.lower():
+                    quarter = "Q1"
+                elif "/q2/" in href.lower():
+                    quarter = "Q2"
+                elif "/q3/" in href.lower():
+                    quarter = "Q3"
+                elif "/q4/" in href.lower():
+                    quarter = "Q4"
+            
+            if quarter:
+                # Skip files that are clearly supplementary
+                if ("commentary" in href.lower() or 
+                    "presentation" in href.lower() or 
+                    "trend" in href.lower()):
+                    print(f"Skipping supplementary document: {href}")
+                    continue
+                    
+                # Add to our results - maintain the expected list format
+                if quarter not in quarterly_reports:
+                    quarterly_reports[quarter] = []
+                quarterly_reports[quarter].append(href)
+                print(f"✅ Found official {quarter} document for {year}: {href}")
+        except Exception as e:
+            print(f"Error processing link: {e}")
 
 def download_report(url_list, download_folder, quarter):
     """Download the quarterly report from the first URL in the list"""
@@ -272,167 +373,212 @@ def download_report(url_list, download_folder, quarter):
     finally:
         driver.quit()
 
+def search_for_reports_by_pattern(year):
+    """Search for quarterly reports using common patterns and timeframes"""
+    reports = {}
+    
+    # NVIDIA follows a fiscal year pattern that's offset from calendar year
+    # Their fiscal Q4 from prior year = calendar Q1 of current year
+    
+    # For 2024: Q4 FY2023 = Q1 2024, Q1 FY2024 = Q2 2024, etc.
+    if str(year) == '2024':
+        patterns = [
+            # Q1 2024 (Jan-Mar) = Q4 FY2023 (ends Jan 2024)
+            ("Q1", [f"{BASE_URL}/2023/q4/", ".pdf"]),
+            # Q2 2024 (Apr-Jun) = Q1 FY2024
+            ("Q2", [f"{BASE_URL}/2024/q1/", ".pdf"]),
+            # Q3 2024 (Jul-Sep) = Q2 FY2024
+            ("Q3", [f"{BASE_URL}/2024/q2/", ".pdf"]),
+            # Q4 2024 (Oct-Dec) = Q3 FY2024 
+            ("Q4", [f"{BASE_URL}/2024/q3/", ".pdf"])
+        ]
+    # For 2025: Q4 FY2024 = Q1 2025, Q1 FY2025 = Q2 2025, etc.
+    elif str(year) == '2025':
+        patterns = [
+            # Q1 2025 (Jan-Mar) = Q4 FY2024 (ends Jan 2025)
+            ("Q1", [f"{BASE_URL}/2024/q4/", ".pdf"]),
+            # Q2 2025 (Apr-Jun) = Q1 FY2025
+            ("Q2", [f"{BASE_URL}/2025/q1/", ".pdf"]),
+            # Q3 2025 (Jul-Sep) = Q2 FY2025
+            ("Q3", [f"{BASE_URL}/2025/q2/", ".pdf"]),
+            # Q4 2025 (Oct-Dec) = Q3 FY2025
+            ("Q4", [f"{BASE_URL}/2025/q3/", ".pdf"])
+        ]
+    else:
+        return {}
+    
+    # Hard-coded commonly used document names and patterns from historical data
+    common_filenames = [
+        "10q.pdf",
+        "10Q.pdf",
+        "10k.pdf", 
+        "10K.pdf",
+        f"NVDA-{year}-Q1-10Q.pdf",
+        f"NVDA-{year}-Q2-10Q.pdf", 
+        f"NVDA-{year}-Q3-10Q.pdf",
+        f"NVDA-{year}-Q4-10K.pdf",
+        "form10q.pdf",
+        "form10k.pdf"
+    ]
+    
+    # Try the common patterns
+    for quarter, (base_path, extension) in patterns:
+        for filename in common_filenames:
+            url = f"{base_path}{filename}"
+            try:
+                response = requests.head(url, timeout=3)
+                if response.status_code == 200:
+                    if quarter not in reports:
+                        reports[quarter] = []
+                    reports[quarter].append(url)
+                    print(f"✅ Found {quarter} document for {year} using pattern search: {url}")
+                    break  # Found one valid URL for this quarter
+            except Exception:
+                continue
+    
+    return reports
+
 # =========================
 # MAIN AIRFLOW TASK
 # =========================
 def main_task(**context):
     """
-    Single main task that:
-    1) Uses get_nvidia_quarterly_links to get links to 2024 quarterly reports
-    2) Downloads the reports directly as PDFs
-    3) Prepares data for the next task
+    Main task that:
+    1) Loops through years 2020-2025
+    2) Uses get_nvidia_quarterly_links to get links to quarterly reports for each year
+    3) Downloads the reports directly as PDFs
+    4) Organizes files by year folder
     """
-    year = "2024"  # Specifically targeting 2024 as requested
+    year_range = range(2020, 2026)  # 2020 to 2025 inclusive
     
-    # Create directory structure
+    # Create base directory structure
     os.makedirs(DOWNLOAD_FOLDER, exist_ok=True)
     os.makedirs(ROOT_FOLDER, exist_ok=True)
-    os.makedirs(YEAR_FOLDER, exist_ok=True)
+    
+    all_successful_quarters = {}
+    all_year_folders = {}
 
     try:
-        # Get the quarterly report links
-        quarterly_reports = get_nvidia_quarterly_links(year)
+        for year in year_range:
+            year_str = str(year)
+            print(f"📅 Processing year {year_str}")
+            
+            # Create year-specific folder
+            year_folder = os.path.join(ROOT_FOLDER, year_str)
+            os.makedirs(year_folder, exist_ok=True)
+            all_year_folders[year_str] = year_folder
+            
+            # Get the quarterly report links for this year
+            quarterly_reports = get_nvidia_quarterly_links(year_str)
+            
+            if not quarterly_reports:
+                print(f"⚠️ No quarterly reports found for {year_str}, skipping to next year")
+                continue
+            
+            print(f"✅ Processing {len(quarterly_reports)} quarterly reports for {year_str}: {quarterly_reports.keys()}")
+            
+            # Download each report for this year
+            successful_quarters = []
+            for quarter, urls in quarterly_reports.items():
+                print(f"Processing downloads for {year_str} {quarter}")
+                if download_report(urls, DOWNLOAD_FOLDER, quarter):
+                    successful_quarters.append(quarter)
+                    
+                    # Rename and move downloaded files to the year folder
+                    downloaded_files = os.listdir(DOWNLOAD_FOLDER)
+                    if not downloaded_files:
+                        print(f"⚠️ No files found in download folder for {quarter}")
+                        continue
+                    
+                    # Get the most recently downloaded file
+                    latest_file = sorted(
+                        [f for f in downloaded_files if not f.endswith(".crdownload")],
+                        key=lambda x: os.path.getmtime(os.path.join(DOWNLOAD_FOLDER, x)),
+                        reverse=True
+                    )[0]
+                    
+                    # Create a simple filename: q1.pdf, q2.pdf, etc.
+                    new_filename = f"{quarter.lower()}.pdf"
+                    
+                    # Move and rename file
+                    src_path = os.path.join(DOWNLOAD_FOLDER, latest_file)
+                    dst_path = os.path.join(year_folder, new_filename)
+                    
+                    os.rename(src_path, dst_path)
+                    print(f"✅ Moved and renamed: {latest_file} → {new_filename} for {year_str}")
+            
+            # Store successful quarters for this year
+            if successful_quarters:
+                all_successful_quarters[year_str] = successful_quarters
         
-        if not quarterly_reports:
-            raise AirflowFailException("❌ Failed to find any quarterly reports on the NVIDIA website")
-        
-        print(f"✅ Processing {len(quarterly_reports)} quarterly reports for {year}: {quarterly_reports.keys()}")
-        
-        # Download each report
-        successful_quarters = []
-        for quarter, urls in quarterly_reports.items():
-            print(f"Processing downloads for {quarter}")
-            if download_report(urls, DOWNLOAD_FOLDER, quarter):
-                successful_quarters.append(quarter)
-                
-                # Rename and move downloaded files to the year folder
-                downloaded_files = os.listdir(DOWNLOAD_FOLDER)
-                if not downloaded_files:
-                    print(f"⚠️ No files found in download folder for {quarter}")
-                    continue
-                
-                # Get the most recently downloaded file
-                latest_file = sorted(
-                    [f for f in downloaded_files if not f.endswith(".crdownload")],
-                    key=lambda x: os.path.getmtime(os.path.join(DOWNLOAD_FOLDER, x)),
-                    reverse=True
-                )[0]
-                
-                # Create a simple filename: q1.pdf, q2.pdf, etc.
-                new_filename = f"{quarter.lower()}.pdf"
-                
-                # Move and rename file
-                src_path = os.path.join(DOWNLOAD_FOLDER, latest_file)
-                dst_path = os.path.join(YEAR_FOLDER, new_filename)
-                
-                os.rename(src_path, dst_path)
-                print(f"✅ Moved and renamed: {latest_file} → {new_filename}")
-        
-        # Push the year folder and successful quarters to XCom
-        context['task_instance'].xcom_push(key='year_folder', value=YEAR_FOLDER)
-        context['task_instance'].xcom_push(key='successful_quarters', value=successful_quarters)
+        # Push all year folders and successful quarters to XCom
+        context['task_instance'].xcom_push(key='year_folders', value=all_year_folders)
+        context['task_instance'].xcom_push(key='successful_quarters_by_year', value=all_successful_quarters)
         
     except Exception as e:
         print(f"❌ Error in main task: {str(e)}")
-        raise AirflowFailException(f"Main task failed: {str(e)}")            
-
+        raise AirflowFailException(f"Main task failed: {str(e)}")
+    
 def upload_and_cleanup(**context):
-    """Uploads all files from the year folder to S3 and deletes them after upload."""
+    """Uploads all files from multiple year folders to S3 and deletes them after upload."""
     try:
         s3_hook = S3Hook(aws_conn_id=AWS_CONN_ID)
         uploaded_files = []
 
-        # Pull the year folder and successful quarters from XCom
-        year_folder = context['task_instance'].xcom_pull(task_ids='nvdia_scrape_download_extract_upload', key='year_folder')
+        # Pull the year folders and successful quarters from XCom
+        year_folders = context['task_instance'].xcom_pull(task_ids='nvdia_scrape_download_extract_upload', key='year_folders')
         
-        if not year_folder or not os.path.exists(year_folder):
-            print("⚠️ Year folder not found for upload.")
+        if not year_folders:
+            print("⚠️ No year folders found for upload.")
             return
 
         # Clean the bucket name - remove any whitespace
         clean_bucket_name = BUCKET_NAME.strip() if isinstance(BUCKET_NAME, str) else BUCKET_NAME
-        print(f"🚀 Processing folder: {year_folder}")
         print(f"Using bucket name: '{clean_bucket_name}' (length: {len(clean_bucket_name)})")
         
-        # Maintain folder structure in S3
-        s3_base_path = f"{S3_BASE_FOLDER}/nvidia_quarterly_report/2024"
+        # Process each year folder
+        for year, folder_path in year_folders.items():
+            if not os.path.exists(folder_path):
+                print(f"⚠️ Year folder {folder_path} not found, skipping")
+                continue
+                
+            print(f"🚀 Processing year folder: {year} at {folder_path}")
+            
+            # Maintain folder structure in S3
+            s3_folder = f"{S3_BASE_FOLDER}/{year}"
 
-        for file_name in os.listdir(year_folder):
-            if file_name.endswith(".pdf"):
-                local_file_path = os.path.join(year_folder, file_name)
+            for file_name in os.listdir(folder_path):
+                if file_name.endswith(".pdf"):
+                    local_file_path = os.path.join(folder_path, file_name)
 
-                # Upload to S3 with proper path
-                s3_key = f"{s3_base_path}/{file_name}"
-                print(f"Uploading {file_name} to S3 at {s3_key}...")
+                    # Upload to S3
+                    s3_key = f"{s3_folder}/{file_name}"
+                    print(f"Uploading {file_name} to S3 at {s3_key}...")
 
-                s3_hook.load_file(
-                    filename=local_file_path,
-                    key=s3_key,
-                    bucket_name=clean_bucket_name,
-                    replace=True
-                )
+                    s3_hook.load_file(
+                        filename=local_file_path,
+                        key=s3_key,
+                        bucket_name=clean_bucket_name,
+                        replace=True
+                    )
 
-                uploaded_files.append(s3_key)
-                print(f"✅ Uploaded: {s3_key}")
+                    uploaded_files.append(s3_key)
+                    print(f"✅ Uploaded: {s3_key}")
 
-        # After successful upload, clean up the folders
-        for file in os.listdir(year_folder):
-            os.remove(os.path.join(year_folder, file))
-        os.rmdir(year_folder)  # Remove year folder
-        os.rmdir(ROOT_FOLDER)  # Remove root folder
-        print(f"🗑️ Cleaned up folders: {year_folder} and {ROOT_FOLDER}")
-
-        print("🎉 Upload and cleanup complete. Files uploaded:", uploaded_files)
-
-    except Exception as e:
-        print(f"❌ Error during upload: {str(e)}")
-        raise
-
-def upload_and_cleanup(**context):
-    """Uploads all files from the year folder to S3 and deletes them after upload."""
-    try:
-        s3_hook = S3Hook(aws_conn_id=AWS_CONN_ID)
-        uploaded_files = []
-
-        # Pull the year folder and successful quarters from XCom
-        year_folder = context['task_instance'].xcom_pull(task_ids='nvdia_scrape_download_extract_upload', key='year_folder')
+            # After successful upload, delete the files in this year folder
+            for file in os.listdir(folder_path):
+                os.remove(os.path.join(folder_path, file))
+            
+            # Remove the year folder
+            os.rmdir(folder_path)
+            print(f"🗑️ Cleaned up year folder: {folder_path}")
         
-        if not year_folder or not os.path.exists(year_folder):
-            print("⚠️ Year folder not found for upload.")
-            return
+        # Remove the root folder if empty
+        if os.path.exists(ROOT_FOLDER) and not os.listdir(ROOT_FOLDER):
+            os.rmdir(ROOT_FOLDER)
+            print(f"🗑️ Removed empty root folder: {ROOT_FOLDER}")
 
-        # Clean the bucket name - remove any whitespace
-        clean_bucket_name = BUCKET_NAME.strip() if isinstance(BUCKET_NAME, str) else BUCKET_NAME
-        print(f"🚀 Processing folder: {year_folder}")
-        print(f"Using bucket name: '{clean_bucket_name}' (length: {len(clean_bucket_name)})")
-        
-        s3_folder = f"{S3_BASE_FOLDER}/2024"
-
-        for file_name in os.listdir(year_folder):
-            if file_name.endswith(".pdf"):
-                local_file_path = os.path.join(year_folder, file_name)
-
-                # Upload to S3
-                s3_key = f"{s3_folder}/{file_name}"
-                print(f"Uploading {file_name} to S3 at {s3_key}...")
-
-                s3_hook.load_file(
-                    filename=local_file_path,
-                    key=s3_key,
-                    bucket_name=clean_bucket_name,  # Use cleaned bucket name
-                    replace=True
-                )
-
-                uploaded_files.append(s3_key)
-                print(f"✅ Uploaded: {s3_key}")
-
-        # After successful upload, delete the folder
-        for file in os.listdir(year_folder):
-            os.remove(os.path.join(year_folder, file))  # Delete files
-        os.rmdir(year_folder)  # Remove folder
-        print(f"🗑️ Deleted folder: {year_folder}")
-
-        print("🎉 Upload and cleanup complete. Files uploaded:", uploaded_files)
+        print(f"🎉 Upload and cleanup complete. Uploaded {len(uploaded_files)} files across {len(year_folders)} years.")
 
     except Exception as e:
         print(f"❌ Error during upload: {str(e)}")

@@ -6,12 +6,14 @@ authors = [
     {name = "shushil girish",email = "girish.sh@northeastern.edu"}
 ]
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.10,<4.0"
 dependencies = [
     "selenium (>=4.0.0)",
     "webdriver-manager (>=3.8.0)",
     "cryptography (>=44.0.2,<45.0.0)",
-    "mistralai (>=1.5.1,<2.0.0)"
+    "mistralai (>=1.5.1,<2.0.0)",
+    "docling (>=2.27.0,<3.0.0)",
+    "boto3 (>=1.37.15,<2.0.0)"
 ]
 
 

@@ -3,7 +3,9 @@
   "BUCKET_NAME": "rag-pipeline-with-airflow ",
   "TEMP_DATA_FOLDER": "/opt/airflow/temp_data",
   "S3_BASE_FOLDER": "nvidia_quarterly_reports",
-  "BASE_URL": "https://investor.nvidia.com/financial-info/financial-reports/default.aspx",
+  "BASE_URL": "https://investor.nvidia.com/financial-info/quarterly-results/default.aspx",
+  "S3_DOCLING_OUTPUT" :"docling_markdowns",
+  "S3_MISTRAL_OUTPUT" : "mistral_markdowns",
   "RESULTS_FOLDER": "/opt/airflow/data/nvidia",
   "default_args": {
     "owner": "airflow",
