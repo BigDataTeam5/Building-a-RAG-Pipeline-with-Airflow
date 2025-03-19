@@ -12,6 +12,7 @@ from airflow.operators.python import PythonOperator
 from airflow.exceptions import AirflowFailException
 from airflow.providers.amazon.aws.hooks.s3 import S3Hook
 from airflow.hooks.base import BaseHook
+from airflow.providers.http.operators.http import SimpleHttpOperator
 import json
 
 
@@ -29,7 +30,7 @@ from webdriver_manager.chrome import ChromeDriverManager
 from selenium.webdriver.chrome.options import Options
 
 # Load configuration from JSON file
-with open('/opt/airflow/config/nvidia_config.json') as config_file:
+with open('/opt/airflow/config/sec_config.json') as config_file:
     config = json.load(config_file)
 
 # S3 Configuration
@@ -63,7 +64,7 @@ EXTRACTED_FOLDER = os.path.join(TEMP_DATA_FOLDER, "extracted")
 dag = DAG(
     "selenium_sec_pipeline",
     default_args=default_args,
-    description="Use Selenium to scrape NVIDIA data, download, extract, and upload to S3",
+    description="Use Selenium to scrape SEC data, download, extract, and upload to S3",
     schedule_interval='@daily',  # Change to @daily if needed
     catchup=False,
 )
@@ -86,118 +87,24 @@ def wait_for_downloads(download_folder, timeout=60):
     print("❌ Timeout: downloads did not complete.")
     return False
 
-def get_nvidia_quarterly_links(year='2022'):
-    """
-    Scrapes NVIDIA's 'Quarterly Results' page for a specific year,
-    returning a dictionary: { 'First Quarter 2022': [pdf_link1, pdf_link2, ...], ... }.
-    """
-    # 1) Configure Selenium (headless Chrome)
-    chrome_options = Options()
-    chrome_options.add_argument("--headless")        # remove if you want to see the browser
-    chrome_options.add_argument("--no-sandbox")
-    chrome_options.add_argument("--disable-dev-shm-usage")
-
-    driver = webdriver.Chrome(
-        service=Service(ChromeDriverManager().install()),
-        options=chrome_options
-    )
-
-    try:
-        # 2) Navigate to Quarterly Results page
-        driver.get("https://investor.nvidia.com/financial-info/quarterly-results/default.aspx")
-
-        # 3) (Optional) Close cookie consent banner if present
-        time.sleep(3)  # short pause to allow banner to load
-        try:
-            accept_btn = driver.find_element(By.ID, "truste-consent-button")
-            accept_btn.click()
-            time.sleep(2)
-        except:
-            pass  # no banner found or different ID
-
-        # 4) Wait for the year dropdown and select the desired year
-        wait = WebDriverWait(driver, 15)
-        year_dropdown = wait.until(EC.presence_of_element_located((By.ID, "year")))
-        year_options = year_dropdown.find_elements(By.TAG_NAME, "option")
-        for opt in year_options:
-            if opt.text.strip() == year:
-                opt.click()
-                break
-
-        # small pause to let page reload for the selected year
-        time.sleep(2)
-
-        # 5) Locate the quarterly blocks and gather PDF links
-        quarter_blocks = driver.find_elements(By.CSS_SELECTOR, ".module_item")
-        results = {}
-        for block in quarter_blocks:
-            # Each block typically has a heading, e.g. "Fourth Quarter 2022"
-            try:
-                heading_el = block.find_element(By.CSS_SELECTOR, ".module_subtitle")
-                heading = heading_el.text.strip()
-            except:
-                continue
-
-            # skip if it doesn't match the desired year
-            if year not in heading:
-                continue
-
-            # gather PDF links in this block
-            pdf_links = []
-            links = block.find_elements(By.TAG_NAME, "a")
-            for link in links:
-                href = link.get_attribute("href")
-                if href and href.lower().endswith(".pdf"):
-                    pdf_links.append(href)
-
-            # store them keyed by the quarter heading
-            if pdf_links:
-                results[heading] = pdf_links
-
-        return results
-
-    finally:
-        driver.quit()
-
-def download_report(driver, url, download_folder, quarter):
-    """Download the quarterly report from the given URL"""
-    try:
-        driver.get(url)
-        print(f"⬇️ Starting download for Q{quarter} from: {url}")
-        time.sleep(5)  # Allow time for page to load
-        
-        # Look for download link - this may need adjustment based on actual page structure
-        download_links = driver.find_elements(By.XPATH, "//a[contains(@href, '.pdf') or contains(@href, '.xls') or contains(@href, '.xlsx')]")
-        if not download_links:
-            raise AirflowFailException(f"❌ No download links found for Q{quarter}")
-        
-        # Click the first available download link
-        download_links[0].click()
-        time.sleep(5)  # Allow time for download to start
-        
-        # Wait for download to complete
-        download_success = wait_for_downloads(download_folder, timeout=60)
-        if not download_success:
-            raise AirflowFailException(f"❌ Download for Q{quarter} did not complete in time.")
-            
-        return True
-    except Exception as e:
-        print(f"❌ Error downloading report for Q{quarter}: {str(e)}")
-        return False
-
 # =========================
 # MAIN AIRFLOW TASK
 # =========================
 def main_task(**context):
     """
     Single main task that:
-    1) Sets up Selenium
-    2) Uses get_nvidia_quarterly_reports to get links to 2022 quarterly reports
-    3) Downloads the reports
-    4) Prepares data for the next task
+    1) Reads year/quarter from DAG run config or defaults
+    2) Uses Selenium to find the needed ZIP link on SEC
+    3) Clicks link to download
+    4) Extracts files from ZIP
     """
-    year = "2022"  # Specifically targeting 2022 as requested
-    
+    year_quarter = context["dag_run"].conf.get("year_quarter")
+
+    if not year_quarter:
+        raise ValueError("❌ No year_quarter received from Streamlit!")
+
+    required_zip = f"{year_quarter}.zip"
+    print(f"🔍 Required ZIP file: {required_zip}")
     os.makedirs(DOWNLOAD_FOLDER, exist_ok=True)
     os.makedirs(EXTRACTED_FOLDER, exist_ok=True)
 
@@ -218,44 +125,71 @@ def main_task(**context):
 
     driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=chrome_options)
 
+    # =======================
+    # 3) Scrape .zip link
+    # =======================
+    driver.get(BASE_URL)
+
     try:
-        # Get the quarterly report links
-        quarterly_reports = get_nvidia_quarterly_links(driver, year)
-        
-        if not quarterly_reports:
-            raise AirflowFailException(f"❌ No quarterly reports found for year {year}")
-        
-        print(f"✅ Found {len(quarterly_reports)} quarterly reports for {year}: {quarterly_reports.keys()}")
-        
-        # Create folders for each quarter
-        quarter_folders = {}
-        for quarter in quarterly_reports.keys():
-            quarter_folder = os.path.join(EXTRACTED_FOLDER, f"{year}{quarter.lower()}")
-            os.makedirs(quarter_folder, exist_ok=True)
-            quarter_folders[quarter] = quarter_folder
-        
-        # Download each report
-        successful_quarters = []
-        for quarter, url in quarterly_reports.items():
-            if download_report(driver, url, DOWNLOAD_FOLDER, quarter):
-                successful_quarters.append(quarter)
-                
-                # Move downloaded files to the corresponding quarter folder
-                for file_name in os.listdir(DOWNLOAD_FOLDER):
-                    if not file_name.endswith(".crdownload"):  # Skip incomplete downloads
-                        src_path = os.path.join(DOWNLOAD_FOLDER, file_name)
-                        dst_path = os.path.join(quarter_folders[quarter], file_name)
-                        os.rename(src_path, dst_path)
-        
-        # Push the extracted folder paths and year_quarters to XCom
-        extracted_folders = [quarter_folders[q] for q in successful_quarters]
-        year_quarters = [f"{year}{q.lower()}" for q in successful_quarters]
-        
-        context['task_instance'].xcom_push(key='extracted_folders', value=extracted_folders)
-        context['task_instance'].xcom_push(key='year_quarters', value=year_quarters)
-        
-    finally:
+        WebDriverWait(driver, 15).until(
+            EC.presence_of_all_elements_located((By.XPATH, "//a[contains(@href, '.zip')]"))
+        )
+        zip_links = driver.find_elements(By.XPATH, "//a[contains(@href, '.zip')]")
+        if not zip_links:
+            raise AirflowFailException("❌ No .zip links found on the page.")
+    except Exception as e:
         driver.quit()
+        raise AirflowFailException(f"❌ Error during scraping ZIP links: {str(e)}")
+
+    # Filter only the needed quarter's .zip
+    matching_links = [elem for elem in zip_links if required_zip in elem.get_attribute("href")]
+    if not matching_links:
+        driver.quit()
+        raise AirflowFailException(f"❌ No ZIP file found for {year_quarter}.")
+
+    print(f"✅ Found {len(matching_links)} matching link(s) for {required_zip}.")
+
+    # =======================
+    # 4) Download the .zip
+    # =======================
+    for link_elem in matching_links:
+        link_url = link_elem.get_attribute("href")
+        print(f"⬇️ Starting download for: {link_url}")
+        link_elem.click()
+        time.sleep(2)  # Let the download begin
+
+    # Wait for all downloads to finish
+    download_success = wait_for_downloads(DOWNLOAD_FOLDER, timeout=60)
+    driver.quit()
+
+    if not download_success:
+        raise AirflowFailException("❌ Downloads did not complete in time.")
+
+    # =======================
+    # 5) Extract All Zips
+    # =======================
+    extracted_folders = []
+    for file_name in os.listdir(DOWNLOAD_FOLDER):
+        if file_name.endswith(".zip"):
+            zip_path = os.path.join(DOWNLOAD_FOLDER, file_name)
+            extract_path = os.path.join(EXTRACTED_FOLDER, file_name.replace(".zip", ""))
+            os.makedirs(extract_path, exist_ok=True)
+            try:
+                with zipfile.ZipFile(zip_path, "r") as zip_ref:
+                    zip_ref.extractall(extract_path)
+                print(f"📂 Extracted: {file_name} => {extract_path}")
+                extracted_folders.append(extract_path)
+            except zipfile.BadZipFile:
+                print(f"❌ Corrupt ZIP file: {file_name}")
+            # Remove the downloaded ZIP after extraction
+            os.remove(zip_path)
+
+    # Extract the year_quarter part from the folder paths
+    year_quarters = [os.path.basename(folder) for folder in extracted_folders]
+
+    # Push the extracted folder paths and year_quarters to XCom
+    context['task_instance'].xcom_push(key='extracted_folders', value=extracted_folders)
+    context['task_instance'].xcom_push(key='year_quarters', value=year_quarters)
 
 def upload_and_cleanup(**context):
     """Uploads all tab-delimited .txt files from temp_data/YYYYqQ folders to S3 and deletes them after upload."""
