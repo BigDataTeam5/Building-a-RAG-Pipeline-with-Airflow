@@ -1,578 +1,425 @@
 import streamlit as st
 import requests
-import pandas as pd
-import snowflake.connector
-from datetime import datetime
 import time
-import json
-import numpy as np
+import sys
 import os
-from dotenv import load_dotenv
-import matplotlib.pyplot as plt
-import redis
-load_dotenv()
-# ✅ Streamlit UI
-st.set_page_config(page_title="Quarter Finder & Snowflake Viewer", layout="wide")
-st.sidebar.title("📊 Navigation")
+import json
+import uuid
+import toml
+# Streamlit UI
+st.set_page_config(page_title="Nvidia Quarterly data RAG", layout="wide")
 
-# ✅ Correct FastAPI Endpoint
-REDIS_HOST = os.getenv("REDIS_HOST")  # Docker service name
-REDIS_PORT = os.getenv("REDIS_PORT")
-print(f"🔍 DEBUG: Redis Host - {REDIS_HOST}, Port - {REDIS_PORT}")
-try:
-    redis_client = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, db=0)
-    redis_client.ping()  # Quick check to ensure Redis is reachable
-    print("✅ Connected to Redis")
-except Exception as e:
-    print(f"❌ Redis connection failed: {e}")
-    redis_client = None  # Fallback if Redis isn't available
-client = redis.Redis(host=REDIS_HOST, port=6379, db=0)  # match your config
-client.delete("snowflake_table_list")              # or "table_data:<table_name>"
-# or client.flushall()  # CAREFUL: This removes ALL keys in Redis!
+# Initialize session state variables if they do not exist
+if "file_uploaded" not in st.session_state:
+    st.session_state.file_uploaded = False
+if "markdown_ready" not in st.session_state:
+    st.session_state.markdown_ready = False
+if "show_pdf_uploader" not in st.session_state:
+    st.session_state.show_pdf_uploader = False
+if "show_url_input" not in st.session_state:
+    st.session_state.show_url_input = False
+# Initialize session state for markdown history
+if "markdown_history" not in st.session_state:
+    st.session_state.markdown_history = []  # To store history of markdown files
+if "selected_markdown_content" not in st.session_state:
+    st.session_state.selected_markdown_content = None
+if "selected_markdown_name" not in st.session_state:
+    st.session_state.selected_markdown_name = None
+# Initialize session state for LLM responses
+if "summary_result" not in st.session_state:
+    st.session_state.summary_result = None
+if "question_result" not in st.session_state:
+    st.session_state.question_result = None
+if "processing_summary" not in st.session_state:
+    st.session_state.processing_summary = False
+if "processing_question" not in st.session_state:
+    st.session_state.processing_question = False
 
-API_URL = os.getenv("API_URL")
-AIRFLOW_API_URL = os.getenv("AIRFLOW_API_URL")
-# Check if API_URL is loaded correctly
-if not API_URL:
-    st.error("❌ API_URL environment variable is not set.")
-    st.stop()
+# RAG-specific session states
+if "pdf_parser" not in st.session_state:
+    st.session_state.pdf_parser = None
+if "rag_method" not in st.session_state:
+    st.session_state.rag_method = None
+if "chunking_strategy" not in st.session_state:
+    st.session_state.chunking_strategy = None
+if "selected_quarters" not in st.session_state:
+    st.session_state.selected_quarters = []
 
-# ✅ Placeholder for buttons
-json_button_placeholder = st.empty()
-rdbms_button_placeholder = st.empty()
-# Initialize session state for buttons
-if 'json_button_enabled' not in st.session_state:
-    st.session_state.json_button_enabled = False
-if 'rdbms_button_enabled' not in st.session_state:
-    st.session_state.rdbms_button_enabled = False
+# FastAPI Base URL - Simple configuration
+if "fastapi_url" not in st.session_state:
+    config_path = os.path.join(os.path.dirname(__file__), ".streamlit", "secret.toml")
+    if os.path.exists(config_path):
+        config_data = toml.load(config_path)
+        st.session_state.fastapi_url = config_data.get("connections", {}).get("FASTAPI_URL")
+                
+if "api_connected" not in st.session_state:
+    st.session_state.api_connected = True
 
-# ✅ Snowflake Configuration
-SNOWFLAKE_CONN_ID = os.getenv("SNOWFLAKE_CONN_ID")  # This will now come from .env or docker-compose
-SNOWFLAKE_ACCOUNT = os.getenv("SNOWFLAKE_ACCOUNT")
-SNOWFLAKE_ROLE = os.getenv("SNOWFLAKE_ROLE")
-SNOWFLAKE_WAREHOUSE = os.getenv("SNOWFLAKE_WAREHOUSE")
-SNOWFLAKE_DATABASE = os.getenv("SNOWFLAKE_DATABASE")
-SNOWFLAKE_SCHEMA = os.getenv("SNOWFLAKE_SCHEMA")
-SNOWFLAKE_LOGIN = os.getenv("SNOWFLAKE_USER")
-SNOWFLAKE_PASSWORD = os.getenv("SNOWFLAKE_PASSWORD")
+# Define function to update API endpoints based on the configured URL
+def update_api_endpoints():
+    base_url = st.session_state.fastapi_url
+    
+    # API Endpoints
+    st.session_state.UPLOAD_PDF_API = f"{base_url}/upload-pdf"
+    st.session_state.LATEST_FILE_API = f"{base_url}/get-latest-file-url"
+    st.session_state.PARSE_PDF_API = f"{base_url}/parse-pdf"
+    st.session_state.CONVERT_MARKDOWN_API = f"{base_url}/convert-pdf-markdown"
+    st.session_state.FETCH_MARKDOWN_API = f"{base_url}/fetch-latest-markdown-urls"
+    st.session_state.FETCH_MARKDOWN_HISTORY = f"{base_url}/list-image-ref-markdowns"
+    st.session_state.SUMMARIZE_API = f"{base_url}/summarize"
+    st.session_state.ASK_QUESTION_API = f"{base_url}/ask-question"
+    st.session_state.GET_LLM_RESULT_API = f"{base_url}/get-llm-result"
+    st.session_state.LLM_MODELS_API = f"{base_url}/llm/models"
+    
+    # RAG-specific endpoints
+    st.session_state.NVIDIA_QUARTERS_API = f"{base_url}/nvidia/quarters"
+    st.session_state.RAG_QUERY_API = f"{base_url}/rag/query"
+    st.session_state.RAG_CONFIG_API = f"{base_url}/rag/config"
 
-print(f"✅ Snowflake Config Loaded: {SNOWFLAKE_ACCOUNT}")
-# ✅ Snowflake Connection Function
+# Initial setup of API endpoints
+update_api_endpoints()
 
-def get_snowflake_connection():
-    """Establish a secure connection to Snowflake."""
+# Function to Upload File to S3 - With improved error handling
+def upload_pdf(file):
     try:
-        conn = snowflake.connector.connect(
-            user=SNOWFLAKE_LOGIN,
-            password=SNOWFLAKE_PASSWORD,
-            account=SNOWFLAKE_ACCOUNT,
-            warehouse=SNOWFLAKE_WAREHOUSE,
-            database=SNOWFLAKE_DATABASE,
-            schema=SNOWFLAKE_SCHEMA,
-            role=SNOWFLAKE_ROLE,
-            client_session_keep_alive=True,
-            login_timeout=60,
-            autocommit=True
-        )
-        return conn
-    except Exception as e:
-        st.error(f"Error connecting to Snowflake: {e}")
-        return None
-
-# ✅ Fetch List of Schemas
-def get_schema_list():
-    try:
-        conn = get_snowflake_connection()
-        if conn:
-            query = "SELECT SCHEMA_NAME FROM INFORMATION_SCHEMA.SCHEMATA"
-            df = pd.read_sql(query, conn)
-            conn.close()
-            return df["SCHEMA_NAME"].tolist() if "SCHEMA_NAME" in df.columns else []
-    except Exception as e:
-        st.error(f"❌ Error fetching schema list: {e}")
-        return []
-
-
-# ✅ Fetch Table List
-def get_table_list(schema):
-    """Retrieve all tables in a specified schema, cached in Redis."""
-    # 1) Build a cache key
-    redis_key = f"snowflake_table_list:{schema}"
-
-    # 2) Check if we have a cached list
-    if redis_client:
-        cached_list = redis_client.get(redis_key)
-        if cached_list:
-            print("✅ Retrieved table list from Redis cache")
-            return json.loads(cached_list)
-
-    # 3) If not cached, fetch from Snowflake
-    conn = get_snowflake_connection()
-    if conn:
-        try:
-            query = f"SELECT TABLE_NAME FROM {SNOWFLAKE_DATABASE}.INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = '{schema}'"
-            df = pd.read_sql(query, conn)
-            conn.close()
-
-            if df.empty:
-                st.warning("⚠️ No tables found in the selected schema.")
-                return []
-
-            # Convert "TABLE_NAME" column to a Python list
-            table_list = df["TABLE_NAME"].tolist() if "TABLE_NAME" in df.columns else []
-
-            # 4) Store in Redis (set a TTL if desired)
-            if redis_client:
-                redis_client.set(redis_key, json.dumps(table_list), ex=3600)  
-                # ex=3600 sets 1-hour expiration
-
-            return table_list
-        except Exception as e:
-            st.error(f"Error fetching table list: {e}")
-            return []
-    return []
-
-def fetch_filtered_data(schema, table_name, offset=0, limit=5000, filters=None):
-    """Retrieve filtered data from a table in a specified schema, with Redis cache."""
-    # Convert filters to JSON serializable format
-    def convert_to_serializable(obj):
-        if isinstance(obj, (np.int64, np.int32)):
-            return int(obj)
-        elif isinstance(obj, (np.float64, np.float32)):
-            return float(obj)
-        elif isinstance(obj, pd.Timestamp):
-            return obj.strftime('%Y-%m-%d')
-        return obj
-
-    if filters:
-        filters = {k: convert_to_serializable(v) for k, v in filters.items()}
-
-    # 1. Build a unique key for the cache
-    redis_key = f"filtered_data:{schema}:{table_name}:{offset}:{limit}:{json.dumps(filters)}"
-
-    # 2. Clear Redis cache (optional, use with caution)
-    if redis_client:
-        redis_client.flushall()
-        print("✅ Redis cache cleared")
-
-    # 3. Check if we already have cached data
-    if redis_client:
-        cached_data = redis_client.get(redis_key)
-        if cached_data:
-            try:
-                # Decode from bytes to string
-                cached_str = cached_data.decode("utf-8")
-                # Convert JSON back to DataFrame
-                df = pd.read_json(cached_str, orient="records")
-                print(f"✅ Retrieved filtered data from Redis cache for table: {table_name}")
-                return df
-            except Exception as e:
-                # If JSON parse fails, delete stale cache and fall back
-                redis_client.delete(redis_key)
-                st.warning(f"⚠️ Cache for '{redis_key}' was invalid, deleted. Re-fetching from Snowflake.")
-                print(f"❌ Error reading cached data: {e}")
-
-    # 4. If no cached data (or we just deleted it), fetch from Snowflake
-    try:
-        conn = get_snowflake_connection()
-        if conn:
-            # Base query
-            query = f'SELECT * FROM {SNOWFLAKE_DATABASE}.{schema}."{table_name}"'
-
-            # Apply filters in SQL query for efficiency
-            where_clauses = []
-            if filters:
-                for column, value in filters.items():
-                    if isinstance(value, list) and len(value) == 2:  # Date range filter
-                        if column.lower() in ['ddate', 'filedate', 'created_dt']:  # Detect date fields
-                            start_date = value[0].strftime('%Y-%m-%d')
-                            end_date = value[1].strftime('%Y-%m-%d')
-                            where_clauses.append(f'"{column}" BETWEEN \'{start_date}\' AND \'{end_date}\'')
-                    elif isinstance(value, tuple):  # Numerical range filter
-                        where_clauses.append(f'"{column}" BETWEEN {value[0]} AND {value[1]}')
-                    elif value and value != "":  # Categorical selection
-                        where_clauses.append(f'"{column}" = \'{value}\'')
-            if where_clauses:
-                query += " WHERE " + " AND ".join(where_clauses)
-
-            query += f' LIMIT {limit} OFFSET {offset}'
-
-            df = pd.read_sql(query, conn)
-            conn.close()
-
-            # Convert date columns to datetime
-            date_columns = ['ddate', 'filedate', 'created_dt']
-            for col in date_columns:
-                if col in df.columns:
-                    df[col] = pd.to_datetime(df[col])
-
-            # Log the data types of the columns
-            print(df.dtypes)
-
-            # 5. Store in Redis for next time (set a TTL if desired)
-            if redis_client:
-                redis_client.set(redis_key, df.to_json(orient="records"), ex=3600)
-                print(f"✅ Cached filtered data in Redis for table: {table_name}")
-
-            return df if not df.empty else pd.DataFrame()
-    except Exception as e:
-        st.error(f"❌ Error fetching filtered data: {e}")
-        return pd.DataFrame()
-    
-# ✅ Fetch Table Data
-def fetch_table_data(table_name, filters=None):
-    """Retrieve up to 100 rows from a table in SEC_SCHEMA, with Redis cache."""
-    # 1. Build a unique key for the cache
-    redis_key = f"table_data:{table_name}"
-
-    # 2. Check if we already have cached data
-    if redis_client:
-        cached_data = redis_client.get(redis_key)
-        if cached_data:
-            try:
-                # Decode from bytes to string
-                cached_str = cached_data.decode("utf-8")
-                # Convert JSON back to DataFrame
-                df = pd.read_json(cached_str, orient="records")
-                print(f"✅ Retrieved data from Redis cache for table: {table_name}")
-                return df
-            except Exception as e:
-                # If JSON parse fails, delete stale cache and fall back
-                redis_client.delete(redis_key)
-                st.warning(f"⚠️ Cache for '{redis_key}' was invalid, deleted. Re-fetching from Snowflake.")
-                print(f"❌ Error reading cached data: {e}")
-
-
-    # 3. If no cached data (or we just deleted it), fetch from Snowflake
-    conn = get_snowflake_connection()
-    if conn:
-        try:
-            query = f'SELECT * FROM {SNOWFLAKE_DATABASE}.{SNOWFLAKE_SCHEMA}."{table_name}" LIMIT 100'
-            df = pd.read_sql(query, conn)
-            conn.close()
-
-            # Apply filters if provided
-            if filters:
-                for column, filter_value in filters.items():
-                    if isinstance(filter_value, tuple) and len(filter_value) == 2:
-                        df = df[(df[column] >= filter_value[0]) & (df[column] <= filter_value[1])]
-                    elif filter_value:
-                        df = df[df[column] == filter_value]
-
-            # 4. Store in Redis for next time (set a TTL if desired)
-            if redis_client:
-                redis_client.set(redis_key, df.to_json(orient="records"), ex=3600)
-                print(f"✅ Cached data in Redis for table: {table_name}")
-
-            return df
-        except Exception as e:
-            st.error(f"Error fetching data: {e}")
-            return pd.DataFrame()
-    return pd.DataFrame()
-
-# ✅ Execute Custom SQL Query
-def execute_query(query):
-    """Execute a custom SELECT query on Snowflake, cached in Redis."""
-    # 1) Normalize or sanitize query if needed (lowercase, strip spaces, etc.)
-    normalized_query = query.strip().lower()
-
-    if not normalized_query.startswith("select"):
-        st.error("❌ Only SELECT queries are allowed for security reasons.")
-        return pd.DataFrame()
-
-    # 2) Build the cache key (you could hash the query for cleanliness)
-    redis_key = f"custom_query:{normalized_query}"
-
-    # 3) Check Redis
-    if redis_client:
-        cached_data = redis_client.get(redis_key)
-        if cached_data:
-            print("✅ Retrieved query result from Redis cache")
-            return pd.read_json(cached_data, orient="records")
-
-    # 4) If no cache, run the query
-    conn = get_snowflake_connection()
-    if not conn:
-        return pd.DataFrame()
-    try:
-        df = pd.read_sql(query, conn)
-        conn.close()
-
-        # 5) Store result in Redis
-        if redis_client and not df.empty:
-            redis_client.set(redis_key, df.to_json(orient="records"), ex=3600)
-            print("✅ Cached custom query result in Redis")
-
-        return df
-    except Exception as e:
-        st.error(f"❌ Query Execution Failed: {e}")
-        return pd.DataFrame()
-
-
-# ✅ Function to trigger Airflow DAG with year_quarter and check status
-def trigger_airflow_dag(year_quarter):
-    dag_id = "selenium_sec_pipeline"  # Replace with your DAG ID
-
-    # Construct the URL for unpausing the DAG
-    unpause_url = f"{AIRFLOW_API_URL}/dags/{dag_id}"
-    # Construct the URL for triggering the DAG
-    trigger_url = f"{AIRFLOW_API_URL}/dags/{dag_id}/dagRuns"
-
-    # Unpause the DAG
-    unpause_response = requests.patch(
-        unpause_url,
-        json={"is_paused": False},
-        headers={"Content-Type": "application/json"},
-        auth=("admin", "admin")
-    )
-    if unpause_response.status_code == 200:
-        st.info(f"✅ DAG {dag_id} unpaused successfully.")
-    else:
-        st.error(f"❌ Failed to unpause DAG: {unpause_response.status_code} - {unpause_response.text}")
-        return
-
-    # Trigger the DAG
-    payload = {
-        "conf": {"year_quarter": year_quarter}  # ✅ Pass quarter directly
-    }
-    
-    response = requests.post(
-        trigger_url,
-        json=payload,
-        headers={"Content-Type": "application/json"},
-        auth=("admin", "admin")  # ✅ Explicitly use basic authentication
-    )
-    if response.status_code == 200:
-        st.success(f"✅ Pipeline triggered for Quarter: {year_quarter}")
-        dag_run_id = response.json()["dag_run_id"]
-        
-        # Check the status of the last DAG run
-        while True:
-            status_response = requests.get(
-                f"{trigger_url}/{dag_run_id}",
-                headers={"Content-Type": "application/json"},
-                auth=("admin", "admin")
-            )
-            if status_response.status_code == 200:
-                status = status_response.json()["state"]
-                if status in ["success", "failed"]:
-                    break
-                time.sleep(10)  # Wait for 10 seconds before checking again
-            else:
-                st.error(f"❌ Failed to get DAG run status: {status_response.status_code} - {status_response.text}")
-                return
-        
-        if status == "success":
-            st.success(f"✅ Pipeline for Quarter {year_quarter} completed successfully!")
-            # ✅ Enable the buttons
-            st.session_state.json_button_enabled = True
-            st.session_state.rdbms_button_enabled = True
-            st.rerun()
-        else:
-            st.error(f"❌ Pipeline for Quarter {year_quarter} failed.")    
-    else:
-        st.error(f"❌ Failed to trigger pipeline: {response.status_code} - {response.text}")
-
-# ✅ Function to trigger additional Airflow DAGs
-def trigger_additional_dag(dag_id):
-    # Unpause the DAG
-    unpause_response = requests.patch(
-        f"{AIRFLOW_API_URL}/dags/{dag_id}",
-        json={"is_paused": False},
-        headers={"Content-Type": "application/json"},
-        auth=("admin", "admin")
-    )
-    if unpause_response.status_code == 200:
-        st.info(f"✅ DAG {dag_id} unpaused successfully.")
-    else:
-        st.error(f"❌ Failed to unpause DAG: {unpause_response.status_code} - {unpause_response.text}")
-        return
-
-    # Trigger the DAG
-    response = requests.post(
-        f"{AIRFLOW_API_URL}/dags/{dag_id}/dagRuns",
-        json={},
-        headers={"Content-Type": "application/json"},
-        auth=("admin", "admin")  # ✅ Explicitly use basic authentication
-    )
-    if response.status_code == 200:
-        st.success(f"✅ {dag_id} pipeline triggered successfully!")
-        dag_run_id = response.json()["dag_run_id"]
-        
-        # Check the status of the last DAG run
-        while True:
-            status_response = requests.get(
-                f"{AIRFLOW_API_URL}/dags/{dag_id}/dagRuns/{dag_run_id}",
-                headers={"Content-Type": "application/json"},
-                auth=("admin", "admin")
-            )
-            if status_response.status_code == 200:
-                status = status_response.json()["state"]
-                if status in ["success", "failed"]:
-                    break
-                time.sleep(10)  # Wait for 10 seconds before checking again
-            else:
-                st.error(f"❌ Failed to get DAG run status: {status_response.status_code} - {status_response.text}")
-                return
-        
-        if status == "success":
-            st.success(f"✅ {dag_id} pipeline completed successfully!")
-        else:
-            st.error(f"❌ {dag_id} pipeline failed.")
-    else:
-        st.error(f"❌ Failed to trigger pipeline: {response.status_code} - {response.text}")
-
-# Add buttons inside placeholders (initially disabled)
-with json_button_placeholder.container():
-    json_button = st.button("JSON Transformation", disabled=not st.session_state.json_button_enabled, key="json_button")
-with rdbms_button_placeholder.container():
-    rdbms_button = st.button("RDBMS Transformation", disabled=not st.session_state.rdbms_button_enabled, key="rdbms_button")
-# ✅ Handle JSON button click
-if json_button:
-    trigger_additional_dag("json_dbt_transformation")  # Replace with your JSON transformation DAG ID
-
-# ✅ Handle RDBMS button click
-if rdbms_button:
-    trigger_additional_dag("rdmbs_dbt_transformation")  # Replace with your RDBMS transformation DAG ID
-    
-# ✅ Sidebar - Select Schema
-schemas = get_schema_list()
-if schemas:
-    SNOWFLAKE_SCHEMA = st.sidebar.selectbox("Select Schema", schemas)
-else:
-    st.error("❌ No schemas found. Check database connection or permissions.")
-    SNOWFLAKE_SCHEMA = None
-
-# ✅ Sidebar - Select View
-view_option = st.sidebar.radio("Choose View:", ["Find Quarter", "View Snowflake Tables", "Query Snowflake Table", "Visualizations"])
-
-# ✅ Quarter Finder Feature
-if view_option == "Find Quarter":
-    st.title("📆 Quarter Finder API")
-    st.markdown("Enter a date (YYYY-MM-DD) to find the corresponding **year and quarter**.")
-    
-    date_input = st.date_input("Enter Date (YYYY-MM-DD)", datetime(2023, 6, 15), min_value=datetime(2000, 1, 1))
-    
-    if st.button("Get Quarter"):
-        date_str = date_input.strftime("%Y-%m-%d")
-        st.info(f"📅 Finding quarter for date: **{date_str}**")
-        # Send POST request to FastAPI backend
-        response = requests.post(API_URL, json={"date": date_str})
+        files = {"file": (file.name, file.getvalue(), "application/pdf")}
+        with st.spinner("📤 Uploading PDF... Please wait."):
+            # Include RAG configuration parameters
+            params = {
+                "parser": st.session_state.pdf_parser,
+                "rag_method": st.session_state.rag_method,
+                "chunking_strategy": st.session_state.chunking_strategy
+            }
+            response = requests.post(st.session_state.UPLOAD_PDF_API, files=files, params=params)
 
         if response.status_code == 200:
-            result = response.json()
-            year_quarter = result["year_quarter"]
-            st.success(f"🗓 The corresponding year and quarter: **{result['year_quarter']}**")
-            st.info(f"Updated config with date: {date_str}")  # Add logging to verify the update
-            # ✅ Directly send the quarter to Airflow DAG
-            trigger_airflow_dag(year_quarter)
+            st.session_state.file_uploaded = True
+            return response.json()
         else:
-            st.error(f"⚠️ API Error: {response.status_code} - {response.text}")
+            try:
+                error_detail = response.json().get("detail", f"Upload failed: {response.status_code}")
+            except ValueError:
+                error_detail = f"Upload failed with status {response.status_code}: {response.text}"
+            st.error(f"Error: {error_detail}")
+            return {"error": error_detail}
+    except requests.RequestException as e:
+        st.error(f"Request Exception: {str(e)}")
+        return {"error": str(e)}
 
-# ✅ Snowflake Table Viewer Feature with Column Filters
-elif view_option == "View Snowflake Tables" and SNOWFLAKE_SCHEMA:
-    st.title("📂 Snowflake Table Viewer")
-    tables = get_table_list(SNOWFLAKE_SCHEMA)
-
-    if tables:
-        selected_table = st.sidebar.selectbox("Select a Table", tables)
-
-        if selected_table:
-            # Fetch FULL data to get filter options
-            full_df = fetch_filtered_data(SNOWFLAKE_SCHEMA, selected_table, limit=5000)
-
-            if not full_df.empty:
-                st.sidebar.subheader("🎯 Column Filters")
-
-                # Ensure columns are stripped of whitespace and converted to lowercase for consistent filtering
-                excluded_columns = {'cik', 'ein', 'changed','value'}  # Add other unwanted columns here
-                filtered_columns = [
-                    col for col in full_df.columns
-                    if not (col.lower().strip() in excluded_columns or 
-                            col.lower().strip().endswith(('_sk', '_dt', '_id', '_code')))
-                ]
-
-                filters = {}
-                for column in filtered_columns:
-                    unique_values = full_df[column].dropna().unique()
-                    if len(unique_values) < 15:  # Categorical filter
-                        filters[column] = st.sidebar.selectbox(f"Filter {column}", [""] + list(unique_values), key=column)
-                    elif pd.api.types.is_numeric_dtype(full_df[column]):  # Numerical range filter
-                        min_val, max_val = int(full_df[column].min()), int(full_df[column].max())
-                        filters[column] = st.sidebar.slider(f"Filter {column}", min_val, max_val, (min_val, max_val), key=column)
-                    elif pd.api.types.is_datetime64_any_dtype(full_df[column]):  # Date range filter
-                        min_date, max_date = full_df[column].min(), full_df[column].max()
-                        filters[column] = st.sidebar.date_input(f"Filter {column}", [min_date, max_date], key=column)
-
-                # Apply button for filters
-                apply_filters = st.sidebar.button("Apply Filters")
-
-                # Fetch filtered data only if "Apply Filters" is clicked
-                if apply_filters:
-                    filtered_df = fetch_filtered_data(SNOWFLAKE_SCHEMA, selected_table, filters=filters)
-
-                    if not filtered_df.empty:
-                        st.subheader(f"📄 Filtered Data from `{selected_table}`")
-                        st.data_editor(filtered_df)  # Efficient DataFrame rendering
-                    else:
-                        st.warning("⚠️ No data available with the applied filters.")
-            else:
-                st.warning("⚠️ No data available in the selected table.")
-    else:
-        st.error("⚠️ No tables found. Check your **database connection** or **permissions**.")
-
-elif view_option == "Query Snowflake Table":
-    st.title("📝 Execute Custom SQL Query on Snowflake")
-    query = st.text_area("Enter your SQL query (Only SELECT queries allowed)", "SELECT * FROM PUBLIC.SAMPLE_TABLE LIMIT 10")
-
-    if st.button("Run Query"):
-        df = execute_query(query)
-
-        if not df.empty:
-            st.dataframe(df)
+# Function to fetch available quarters from the Nvidia dataset
+def fetch_nvidia_quarters():
+    try:
+        response = requests.get(st.session_state.NVIDIA_QUARTERS_API)
+        if response.status_code == 200:
+            return response.json().get("quarters", [])
         else:
-            st.warning("⚠️ No data returned from query.")
+            st.warning(f"Could not fetch available quarters: {response.status_code}")
+            return []
+    except Exception as e:
+        st.warning(f"Error fetching quarters: {str(e)}")
+        return []
 
-
-# ✅ Data Visualization
-elif view_option == "Visualizations" and SNOWFLAKE_SCHEMA:
-    st.title("📊 Data Visualization")
-    tables = get_table_list(SNOWFLAKE_SCHEMA)
-    if tables:
-        selected_table = st.sidebar.selectbox("Select a Table for Visualization", tables)
-        if selected_table:
-            sample_df = fetch_filtered_data(SNOWFLAKE_SCHEMA, selected_table, limit=1000)
-            if not sample_df.empty:
-                numeric_columns = sample_df.select_dtypes(include=["number"]).columns.tolist()
-                categorical_columns = sample_df.select_dtypes(include=["object"]).columns.tolist()
+# Function to Submit RAG Query
+def submit_rag_query(question, model, quarters=None):
+    try:
+        with st.spinner("⏳ Processing your question with RAG pipeline... This may take a moment."):
+            request_id = f"rag_{uuid.uuid4()}"
+            
+            # Prepare the request payload
+            payload = {
+                "request_id": request_id,
+                "question": question,
+                "model": model,
+                "parser": st.session_state.pdf_parser,
+                "rag_method": st.session_state.rag_method,
+                "chunking_strategy": st.session_state.chunking_strategy,
+                "quarters": quarters
+            }
+            
+            # Submit to API
+            response = requests.post(
+                st.session_state.RAG_QUERY_API, 
+                json=payload
+            )
+            
+            if response.status_code == 202:
+                # Got a job ID, need to poll for result
+                job_id = response.json().get("request_id")
+                result = poll_for_llm_result(job_id)
                 
-                if numeric_columns or categorical_columns:
-                    plot_type = st.sidebar.radio("Select Plot Type", ["Scatter Plot", "Line Chart", "Bar Chart", "Pie Chart", "Histogram"])
-
-                    fig, ax = plt.subplots(figsize=(8, 5))
-                    if plot_type == "Scatter Plot" and numeric_columns:
-                        x_column = st.sidebar.selectbox("Select X-axis Column", numeric_columns)
-                        y_column = st.sidebar.selectbox("Select Y-axis Column", numeric_columns)
-                        ax.scatter(sample_df[x_column], sample_df[y_column])
-                    elif plot_type == "Line Chart" and numeric_columns:
-                        x_column = st.sidebar.selectbox("Select X-axis Column", numeric_columns)
-                        y_column = st.sidebar.selectbox("Select Y-axis Column", numeric_columns)
-                        ax.plot(sample_df[x_column], sample_df[y_column])
-                    elif plot_type == "Bar Chart" and categorical_columns:
-                        cat_column = st.sidebar.selectbox("Select Categorical Column", categorical_columns)
-                        num_column = st.sidebar.selectbox("Select Numerical Column", numeric_columns)
-                        ax.bar(sample_df[cat_column].astype(str), sample_df[num_column])
-                    elif plot_type == "Pie Chart" and categorical_columns:
-                        cat_column = st.sidebar.selectbox("Select Categorical Column for Pie Chart", categorical_columns)
-                        sample_df[cat_column].value_counts().plot(kind='pie', autopct='%1.1f%%', ax=ax)
-                    elif plot_type == "Histogram" and numeric_columns:
-                        hist_column = st.sidebar.selectbox("Select Column for Histogram", numeric_columns)
-                        sample_df[hist_column].plot(kind='hist', ax=ax)
-
-                    st.pyplot(fig)
+                if result and "error" not in result:
+                    return result
                 else:
-                    st.warning("⚠️ No numeric or categorical columns available for visualization.")
+                    st.error(f"Error getting answer: {result.get('error', 'Unknown error')}")
+                    return None
             else:
-                st.warning("⚠️ No data available in the selected table.")
-    else:
-        st.error("⚠️ No tables found. Check your **database connection** or **permissions**.")
+                st.error(f"Failed to submit query: {response.text}")
+                return None
+    except Exception as e:
+        st.error(f"Error in query processing: {str(e)}")
+        return None
+
+# Function to fetch available LLM models from API
+def fetch_available_models():
+    """Fetch available LLM models from the backend API"""
+    try:
+        response = requests.get(st.session_state.LLM_MODELS_API)
+        if response.status_code == 200:
+            models = response.json().get("models", [])
+            return models
+        else:
+            st.warning(f"Could not fetch available models: {response.status_code}")
+            return ["gpt-4"]  # Default fallback model
+    except Exception as e:
+        st.warning(f"Error fetching models: {str(e)}")
+        return ["gpt-4"]  # Default fallback model
+
+# Improved polling function with progress bar and timeout
+def poll_for_llm_result(job_id, max_retries=15, interval=2):
+    """Poll for LLM result with a progress bar and better timeout handling"""
+    retries = 0
+    
+    # Create a progress bar
+    progress_text = "Waiting for LLM to process your request..."
+    progress_bar = st.progress(0)
+    
+    while retries < max_retries:
+        try:
+            # Calculate progress percentage
+            progress = min(retries / max_retries, 0.95)  # Cap at 95% until complete
+            progress_bar.progress(progress)
+            
+            # Check result status
+            response = requests.get(
+                f"{st.session_state.GET_LLM_RESULT_API}/{job_id}",
+                timeout=10
+            )
+            
+            if response.status_code == 200:
+                result_data = response.json()
+                status = result_data.get("status")
+                
+                if status == "completed":
+                    progress_bar.progress(1.0)  # Complete the progress bar
+                    time.sleep(0.5)  # Brief pause to show completed progress
+                    progress_bar.empty()  # Remove the progress bar
+                    return result_data
+                    
+                elif status == "failed":
+                    progress_bar.empty()
+                    st.error(f"LLM processing failed: {result_data.get('error', 'Unknown error')}")
+                    return None
+                    
+            retries += 1
+            time.sleep(interval)
+            
+        except Exception as e:
+            progress_bar.empty()
+            st.error(f"Error while polling for result: {str(e)}")
+            return None
+    
+    # If we get here, we've exceeded max retries
+    progress_bar.empty()
+    st.error(f"Timed out waiting for LLM response after {max_retries * interval} seconds.")
+    return None
+
+# Fetch models at startup
+if "available_models" not in st.session_state:
+    st.session_state.available_models = fetch_available_models()
+
+# Sidebar UI
+with st.sidebar:
+    st.title("RAG Pipeline Configuration")
+    
+    # Dropdown for data source
+    data_source = st.selectbox(
+        "Select Data Source:",
+        ["Select an option", "PDF Upload", "Nvidia Dataset"],
+        index=0
+    )
+    
+    # PDF parser selection
+    pdf_parser = st.selectbox(
+        "Select PDF Parser:",
+        ["Select a parser", "Basic Parser", "Docling", "Mistral OCR"],
+        index=0
+    )
+    
+    # RAG method selection
+    rag_method = st.selectbox(
+        "Select RAG Method:",
+        ["Select a method", "Naive (Manual Embeddings)", "Pinecone", "ChromaDB"],
+        index=0
+    )
+    
+    # Chunking strategy
+    chunking_strategy = st.selectbox(
+        "Select Chunking Strategy:",
+        ["Select a strategy", "Fixed Size", "Semantic", "Recursive"],
+        index=0
+    )
+    
+    # If Nvidia dataset is selected, show quarter selection
+    if data_source == "Nvidia Dataset":
+        available_quarters = fetch_nvidia_quarters()
+        if available_quarters:
+            selected_quarters = st.multiselect(
+                "Select Quarters to Query:",
+                available_quarters,
+                default=available_quarters[:1] if available_quarters else []
+            )
+            st.session_state.selected_quarters = selected_quarters
+    
+    # LLM model selection
+    available_models = ["Select Model"] + st.session_state.available_models
+    llm_model = st.selectbox("Select LLM Model:", available_models, index=0)
+    
+    # Save selections to session state
+    st.session_state.data_source = data_source
+    st.session_state.pdf_parser = pdf_parser if pdf_parser != "Select a parser" else None
+    st.session_state.rag_method = rag_method if rag_method != "Select a method" else None
+    st.session_state.chunking_strategy = chunking_strategy if chunking_strategy != "Select a strategy" else None
+    st.session_state.llm_model = llm_model if llm_model != "Select Model" else None
+
+    # Apply configuration button
+    if st.button("Apply Configuration"):
+        if data_source == "Select an option":
+            st.error("Please select a data source")
+        elif pdf_parser == "Select a parser":
+            st.error("Please select a PDF parser")
+        elif rag_method == "Select a method":
+            st.error("Please select a RAG method")
+        elif chunking_strategy == "Select a strategy":
+            st.error("Please select a chunking strategy")
+        elif llm_model == "Select Model":
+            st.error("Please select an LLM model")
+        elif data_source == "Nvidia Dataset" and not selected_quarters:
+            st.error("Please select at least one quarter")
+        else:
+            st.success("Configuration applied successfully")
+            st.session_state.next_clicked = True
+            st.rerun()
+
+# Main Page Logic
+st.title("📄 RAG Pipeline with Airflow")
+
+if st.session_state.get("next_clicked", False):
+    if st.session_state.data_source == "PDF Upload":
+        st.header("Upload PDF Document")
+        
+        # Display file uploader
+        uploaded_file = st.file_uploader("Upload a PDF File:", type=["pdf"], key="pdf_uploader")
+        if uploaded_file:
+            st.session_state.file_uploaded = True
+            upload_response = upload_pdf(uploaded_file)
+            if "error" not in upload_response:
+                st.success("✅ PDF File Uploaded Successfully!")
+                st.info("The document will be processed through the RAG pipeline with your selected configuration.")
+    
+    elif st.session_state.data_source == "Nvidia Dataset":
+        st.header("Query Nvidia Quarterly Reports")
+        
+        # Display selected configuration
+        st.subheader("Current Configuration:")
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            st.info(f"**PDF Parser:** {st.session_state.pdf_parser}")
+        with col2:
+            st.info(f"**RAG Method:** {st.session_state.rag_method}")
+        with col3:
+            st.info(f"**Chunking Strategy:** {st.session_state.chunking_strategy}")
+        
+        # Display selected quarters
+        st.subheader("Selected Quarters:")
+        if st.session_state.selected_quarters:
+            quarters_display = ", ".join(st.session_state.selected_quarters)
+            st.info(f"Querying data from: **{quarters_display}**")
+        else:
+            st.warning("No quarters selected. Please select at least one quarter in the sidebar.")
+        
+    # Question and answer section (common for both data sources)
+    if ((st.session_state.data_source == "PDF Upload" and st.session_state.file_uploaded) or 
+        (st.session_state.data_source == "Nvidia Dataset" and st.session_state.selected_quarters)):
+        
+        st.markdown("---")
+        st.subheader("Ask Questions About the Data")
+        
+        user_question = st.text_area(
+            "Enter your question:",
+            placeholder="Example: What was Nvidia's revenue in Q2 2023?",
+            key="rag_question"
+        )
+        
+        if st.button("Submit Query", type="primary"):
+            if not user_question:
+                st.error("Please enter a question.")
+            else:
+                # Submit RAG query using selected configuration
+                quarters = st.session_state.selected_quarters if st.session_state.data_source == "Nvidia Dataset" else None
+                result = submit_rag_query(user_question, st.session_state.llm_model, quarters)
+                
+                if result:
+                    # Display the answer
+                    st.session_state.question_result = result
+                    
+                    # Show the answer with citations
+                    st.markdown("### Answer")
+                    answer_text = result.get("answer", "No answer available")
+                    st.markdown(answer_text)
+                    
+                    # Show source documents if available
+                    if "sources" in result and result["sources"]:
+                        with st.expander("Source Documents", expanded=False):
+                            for idx, source in enumerate(result["sources"]):
+                                st.markdown(f"#### Source {idx+1}")
+                                st.markdown(f"**Document:** {source.get('document', 'Unknown')}")
+                                st.markdown(f"**Text:** {source.get('text', 'No text available')}")
+                                st.markdown("---")
+else:
+    # Main landing page
+    st.header("Welcome to the RAG Pipeline with Airflow")
+    st.markdown("""
+    This application lets you use a Retrieval-Augmented Generation (RAG) pipeline 
+    to query PDF documents or Nvidia's quarterly reports.
+    
+    ### Configuration Options:
+    
+    1. **Select your data source:**
+       - Upload your own PDF documents
+       - Query Nvidia quarterly reports from the past 5 years
+    
+    2. **Choose your PDF parsing method:**
+       - Basic Parser
+       - Docling
+       - Mistral OCR
+    
+    3. **Select RAG implementation:**
+       - Naive approach (Manual embeddings)
+       - Pinecone vector database
+       - ChromaDB vector database
+    
+    4. **Choose chunking strategy:**
+       - Fixed Size
+       - Semantic
+       - Recursive
+    
+    ### Get Started:
+    Configure your preferences in the sidebar and click "Apply Configuration".
+    """)
+    
+    # System architecture diagram (placeholder)
+    st.subheader("System Architecture")
+    st.markdown("""
+    ```
+    ┌─────────────┐    ┌─────────────┐    ┌─────────────┐
+    │  Streamlit  │───►│   FastAPI   │───►│   Airflow   │
+    │   (UI)      │◄───│  (Backend)  │◄───│  (Pipeline) │
+    └─────────────┘    └─────────────┘    └─────────────┘
+                            │                   │
+                            ▼                   ▼
+                       ┌─────────────┐    ┌─────────────┐
+                       │ LLM Service │    │ Vector DB   │
+                       │             │    │             │
+                       └─────────────┘    └─────────────┘
+    ```
+    """)

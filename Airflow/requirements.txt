@@ -7,3 +7,5 @@ selenium
 webdriver-manager
 requests
 python-dotenv
+docling
+mistralai
