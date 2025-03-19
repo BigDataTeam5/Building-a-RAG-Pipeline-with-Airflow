@@ -1,0 +1,11 @@
+fastapi
+streamlit
+boto3
+chromadb
+pinecone-client
+sentence-transformers
+nltk
+selenium
+docling
+mistralai
+apache-airflow
