@@ -72,23 +72,6 @@ dag = DAG(
     catchup=False,
 )
 
-# =========================
-# HELPER FUNCTIONS
-# =========================
-
-def wait_for_downloads(download_folder, timeout=60):
-    """
-    Wait until downloads are complete (no *.crdownload files) or until timeout (seconds).
-    """
-    start_time = time.time()
-    while time.time() - start_time < timeout:
-        if any(f.endswith(".crdownload") for f in os.listdir(download_folder)):
-            time.sleep(2)  # still downloading
-        else:
-            print("✅ All downloads completed.")
-            return True
-    print("❌ Timeout: downloads did not complete.")
-    return False
 
 def get_nvidia_quarterly_links(year):
     """
@@ -201,55 +184,6 @@ def get_nvidia_quarterly_links(year):
         driver.quit()
 
 
-def process_links(links, quarterly_reports, year):
-    """Helper function to process links and add them to quarterly_reports dictionary"""
-    for link in links:
-        try:
-            href = link.get_attribute("href")
-            text = link.text.strip()
-            
-            if not href or not href.endswith(".pdf"):
-                continue
-                
-            print(f"Processing link: {text} - {href}")
-            
-            # Determine quarter from the link text or URL
-            quarter = None
-            if text.startswith("Q1") or "Q1" in text:
-                quarter = "Q1"
-            elif text.startswith("Q2") or "Q2" in text:
-                quarter = "Q2"
-            elif text.startswith("Q3") or "Q3" in text:
-                quarter = "Q3"
-            elif text.startswith("Q4") or "Q4" in text:
-                quarter = "Q4"
-                
-            # If we can't determine from text, use URL path
-            if not quarter:
-                if "/q1/" in href.lower():
-                    quarter = "Q1"
-                elif "/q2/" in href.lower():
-                    quarter = "Q2"
-                elif "/q3/" in href.lower():
-                    quarter = "Q3"
-                elif "/q4/" in href.lower():
-                    quarter = "Q4"
-            
-            if quarter:
-                # Skip files that are clearly supplementary
-                if ("commentary" in href.lower() or 
-                    "presentation" in href.lower() or 
-                    "trend" in href.lower()):
-                    print(f"Skipping supplementary document: {href}")
-                    continue
-                    
-                # Add to our results - maintain the expected list format
-                if quarter not in quarterly_reports:
-                    quarterly_reports[quarter] = []
-                quarterly_reports[quarter].append(href)
-                print(f"✅ Found official {quarter} document for {year}: {href}")
-        except Exception as e:
-            print(f"Error processing link: {e}")
 
 def download_report(url_list, download_folder, filename):
     """
@@ -297,70 +231,6 @@ def download_report(url_list, download_folder, filename):
         return False
 
 
-def search_for_reports_by_pattern(year):
-    """Search for quarterly reports using common patterns and timeframes"""
-    reports = {}
-    
-    # NVIDIA follows a fiscal year pattern that's offset from calendar year
-    # Their fiscal Q4 from prior year = calendar Q1 of current year
-    
-    # For 2024: Q4 FY2023 = Q1 2024, Q1 FY2024 = Q2 2024, etc.
-    if str(year) == '2024':
-        patterns = [
-            # Q1 2024 (Jan-Mar) = Q4 FY2023 (ends Jan 2024)
-            ("Q1", [f"{BASE_URL}/2023/q4/", ".pdf"]),
-            # Q2 2024 (Apr-Jun) = Q1 FY2024
-            ("Q2", [f"{BASE_URL}/2024/q1/", ".pdf"]),
-            # Q3 2024 (Jul-Sep) = Q2 FY2024
-            ("Q3", [f"{BASE_URL}/2024/q2/", ".pdf"]),
-            # Q4 2024 (Oct-Dec) = Q3 FY2024 
-            ("Q4", [f"{BASE_URL}/2024/q3/", ".pdf"])
-        ]
-    # For 2025: Q4 FY2024 = Q1 2025, Q1 FY2025 = Q2 2025, etc.
-    elif str(year) == '2025':
-        patterns = [
-            # Q1 2025 (Jan-Mar) = Q4 FY2024 (ends Jan 2025)
-            ("Q1", [f"{BASE_URL}/2024/q4/", ".pdf"]),
-            # Q2 2025 (Apr-Jun) = Q1 FY2025
-            ("Q2", [f"{BASE_URL}/2025/q1/", ".pdf"]),
-            # Q3 2025 (Jul-Sep) = Q2 FY2025
-            ("Q3", [f"{BASE_URL}/2025/q2/", ".pdf"]),
-            # Q4 2025 (Oct-Dec) = Q3 FY2025
-            ("Q4", [f"{BASE_URL}/2025/q3/", ".pdf"])
-        ]
-    else:
-        return {}
-    
-    # Hard-coded commonly used document names and patterns from historical data
-    common_filenames = [
-        "10q.pdf",
-        "10Q.pdf",
-        "10k.pdf", 
-        "10K.pdf",
-        f"NVDA-{year}-Q1-10Q.pdf",
-        f"NVDA-{year}-Q2-10Q.pdf", 
-        f"NVDA-{year}-Q3-10Q.pdf",
-        f"NVDA-{year}-Q4-10K.pdf",
-        "form10q.pdf",
-        "form10k.pdf"
-    ]
-    
-    # Try the common patterns
-    for quarter, (base_path, extension) in patterns:
-        for filename in common_filenames:
-            url = f"{base_path}{filename}"
-            try:
-                response = requests.head(url, timeout=3)
-                if response.status_code == 200:
-                    if quarter not in reports:
-                        reports[quarter] = []
-                    reports[quarter].append(url)
-                    print(f"✅ Found {quarter} document for {year} using pattern search: {url}")
-                    break  # Found one valid URL for this quarter
-            except Exception:
-                continue
-    
-    return reports
 
 # =========================
 # MAIN AIRFLOW TASK
@@ -373,8 +243,9 @@ def main_task(**context):
       3) Downloads the first 10-K/10-Q report for each quarter and saves it with a simple filename
          (e.g. q1.pdf, q2.pdf) in the year folder.
       4) Organizes files by year folder.
+      5) Stores original URLs in XCom for direct processing.
     """
-    year_range = range(2020, 2026)  # 2020 to 2025 inclusive
+    year_range = range(2025, 2026)  # 2020 to 2025 inclusive
     
     # Create base directory structure
     os.makedirs(DOWNLOAD_FOLDER, exist_ok=True)
@@ -382,6 +253,7 @@ def main_task(**context):
     
     all_successful_quarters = {}
     all_year_folders = {}
+    all_quarterly_reports = {}  # Store all quarterly report URLs
     
     try:
         for year in year_range:
@@ -395,6 +267,7 @@ def main_task(**context):
             
             # Get the quarterly report links for this year
             quarterly_reports = get_nvidia_quarterly_links(year_str)
+            all_quarterly_reports[year_str] = quarterly_reports
             
             if not quarterly_reports:
                 print(f"⚠️ No quarterly reports found for {year_str}, skipping to next year")
@@ -405,6 +278,13 @@ def main_task(**context):
             # Process each quarter (only download the first found file per quarter)
             for quarter, url_list in quarterly_reports.items():
                 print(f"Processing download for {year_str} {quarter}")
+                
+                # Store the URL list in XCom for later direct access
+                context['task_instance'].xcom_push(
+                    key=f'report_urls_{year_str}_{quarter}',
+                    value=url_list
+                )
+                
                 # Define the target filename (e.g., "q1.pdf", "q2.pdf", etc.)
                 filename = quarter.lower() + ".pdf"
                 
@@ -425,11 +305,12 @@ def main_task(**context):
         # Push folder info to XCom if needed
         context['task_instance'].xcom_push(key='year_folders', value=all_year_folders)
         context['task_instance'].xcom_push(key='successful_quarters_by_year', value=all_successful_quarters)
+        context['task_instance'].xcom_push(key='quarterly_reports', value=all_quarterly_reports)
     
     except Exception as e:
         print(f"❌ Error in main task: {str(e)}")
         raise AirflowFailException(f"Main task failed: {str(e)}")
-
+    
 
 def upload_and_cleanup(**context):
     """Uploads all files from multiple year folders to S3 and deletes them after upload."""
@@ -496,6 +377,295 @@ def upload_and_cleanup(**context):
         print(f"❌ Error during upload: {str(e)}")
         raise
 
+def convert_pdfs_docling(**context):
+    """Process PDFs with Docling using direct URLs, downloading as needed"""
+    import tempfile
+    import shutil
+    import sys
+    import os
+    import requests
+    from pathlib import Path
+    from airflow.providers.amazon.aws.hooks.s3 import S3Hook
+    
+    # Add paths for importing custom modules
+    dag_folder = os.path.dirname(os.path.abspath(__file__))
+    if dag_folder not in sys.path:
+        sys.path.insert(0, dag_folder)
+    
+    # Lazy import the docling module
+    try:
+        from parsing_methods.doclingparsing import main as docling_process_pdf
+        docling_available = True
+    except ImportError as e:
+        print(f"Docling package not installed: {str(e)}")
+        return []
+    
+    # Load configuration
+    with open('/opt/airflow/config/nvidia_config.json') as config_file:
+        config = json.load(config_file)
+    
+    BUCKET_NAME = config['BUCKET_NAME'].strip()
+    AWS_CONN_ID = config['AWS_CONN_ID']
+    S3_DOCLING_OUTPUT = config.get('S3_DOCLING_OUTPUT', 'docling_markdowns')
+    
+    # Initialize S3 hook
+    s3_hook = S3Hook(aws_conn_id=AWS_CONN_ID)
+    results = []
+    
+    # Get the quarterly report links from XCom
+    quarterly_reports_by_year = context['task_instance'].xcom_pull(
+        task_ids='nvdia_scrape_download_extract_upload', 
+        key='successful_quarters_by_year'
+    )
+    
+    if not quarterly_reports_by_year:
+        print("No quarterly reports found. Cannot proceed with Docling processing.")
+        return []
+    
+    # Create temporary working directory
+    temp_dir = tempfile.mkdtemp()
+    try:
+        for year, quarters in quarterly_reports_by_year.items():
+            for quarter, filename in quarters.items():
+                try:
+                    # Get the original URL for this report
+                    original_urls = context['task_instance'].xcom_pull(
+                        task_ids='nvdia_scrape_download_extract_upload', 
+                        key=f'report_urls_{year}_{quarter}'
+                    )
+                    
+                    if not original_urls:
+                        print(f"No URL found for {year} {quarter}, checking quarter data...")
+                        # Try to get the URL from the quarterly_reports data
+                        quarter_data = context['task_instance'].xcom_pull(
+                            task_ids='nvdia_scrape_download_extract_upload', 
+                            key='quarterly_reports'
+                        )
+                        if quarter_data and year in quarter_data and quarter in quarter_data[year]:
+                            original_urls = quarter_data[year][quarter]
+                        
+                    if not original_urls:
+                        # If still no URL, create one from the S3 object
+                        print(f"No direct URL found for {year} {quarter}, using S3 path")
+                        s3_key = f"{config['S3_BASE_FOLDER']}/{year}/{quarter.lower()}.pdf"
+                        
+                        # Get URL from S3
+                        presigned_url = s3_hook.get_conn().generate_presigned_url(
+                            'get_object',
+                            Params={'Bucket': BUCKET_NAME, 'Key': s3_key},
+                            ExpiresIn=3600  # 1 hour expiration
+                        )
+                        original_url = presigned_url
+                    else:
+                        # Use the first URL from the list if it's a list
+                        original_url = original_urls[0] if isinstance(original_urls, list) else original_urls
+                    
+                    print(f"Processing {year} {quarter} with URL: {original_url}")
+                    
+                    # Create directory for this file
+                    file_dir = os.path.join(temp_dir, f"{year}_{quarter}")
+                    os.makedirs(file_dir, exist_ok=True)
+                    
+                    # Download the PDF from the URL
+                    local_pdf_path = os.path.join(file_dir, f"{quarter}.pdf")
+                    print(f"Downloading from {original_url} to {local_pdf_path}")
+                    
+                    response = requests.get(original_url, timeout=30)
+                    if response.status_code == 200:
+                        with open(local_pdf_path, 'wb') as f:
+                            f.write(response.content)
+                        print(f"Successfully downloaded to {local_pdf_path}")
+                    else:
+                        raise Exception(f"Failed to download PDF. Status code: {response.status_code}")
+                    
+                    # Process the PDF using Docling
+                    docling_process_pdf(local_pdf_path)
+                    
+                    # Docling saves the file with a specific naming pattern in the output directory
+                    output_dir = Path(f"output/{Path(local_pdf_path).stem}")
+                    md_filename = f"{Path(local_pdf_path).stem}-with-images.md"
+                    markdown_path = output_dir / md_filename
+                    
+                    if markdown_path.exists():
+                        # Create the S3 destination key
+                        s3_dest_key = f"{S3_DOCLING_OUTPUT}/{year}/{quarter}.md"
+                        
+                        # Upload the markdown file to S3
+                        s3_hook.load_file(
+                            filename=str(markdown_path),
+                            key=s3_dest_key,
+                            bucket_name=BUCKET_NAME,
+                            replace=True
+                        )
+                        
+                        print(f"Uploaded Docling markdown for {year}/{quarter} to {s3_dest_key}")
+                        results.append({
+                            "year": year, 
+                            "quarter": quarter, 
+                            "method": "docling", 
+                            "status": "success"
+                        })
+                    else:
+                        print(f"Error: Docling markdown file not found at {markdown_path}")
+                        results.append({
+                            "year": year, 
+                            "quarter": quarter, 
+                            "method": "docling", 
+                            "status": "error"
+                        })
+                
+                except Exception as e:
+                    print(f"Error processing {year} {quarter} with Docling: {str(e)}")
+                    results.append({
+                        "year": year, 
+                        "quarter": quarter, 
+                        "method": "docling", 
+                        "status": "error", 
+                        "error": str(e)
+                    })
+    
+    finally:
+        # Clean up temporary directory
+        shutil.rmtree(temp_dir)
+    
+    return results
+
+def convert_pdfs_mistral(**context):
+    """Process PDFs using Mistral OCR directly from source URLs"""
+    import tempfile
+    import sys
+    import os
+    from airflow.providers.amazon.aws.hooks.s3 import S3Hook
+    
+    # Add paths for importing custom modules
+    dag_folder = os.path.dirname(os.path.abspath(__file__))
+    if dag_folder not in sys.path:
+        sys.path.insert(0, dag_folder)
+    
+    # Get the quarterly report links from XCom
+    quarterly_reports_by_year = context['task_instance'].xcom_pull(
+        task_ids='nvdia_scrape_download_extract_upload', 
+        key='successful_quarters_by_year'
+    )
+    
+    # Pull configuration information
+    with open('/opt/airflow/config/nvidia_config.json') as config_file:
+        config = json.load(config_file)
+    
+    BUCKET_NAME = config['BUCKET_NAME'].strip()
+    AWS_CONN_ID = config['AWS_CONN_ID']
+    S3_MISTRAL_OUTPUT = config.get('S3_MISTRAL_OUTPUT', 'mistral_markdowns')
+    
+    # Initialize S3 hook
+    s3_hook = S3Hook(aws_conn_id=AWS_CONN_ID)
+    results = []
+    
+    # Check if we got the quarterly reports
+    if not quarterly_reports_by_year:
+        print("No quarterly reports found. Cannot proceed with Mistral processing.")
+        return []
+    
+    # Check if mistralai package is installed
+    try:
+        from parsing_methods.mistralparsing import process_pdf as mistral_process_pdf
+        mistral_available = True
+    except ImportError as e:
+        print(f"Mistral AI package not installed: {str(e)}")
+        mistral_available = False
+        return []
+    
+    # Create temporary working directory
+    temp_dir = tempfile.mkdtemp()
+    try:
+        # Get the links from the original get_nvidia_quarterly_links function
+        for year, quarters in context['task_instance'].xcom_pull(task_ids='nvdia_scrape_download_extract_upload', key='successful_quarters_by_year').items():
+            for quarter, filename in quarters.items():
+                try:
+                    # Get the original URL for this report
+                    original_urls = context['task_instance'].xcom_pull(
+                        task_ids='nvdia_scrape_download_extract_upload', 
+                        key=f'report_urls_{year}_{quarter}'
+                    )
+                    
+                    if not original_urls:
+                        print(f"No URL found for {year} {quarter}, checking quarter data...")
+                        original_urls = quarterly_reports_by_year.get(year, {}).get(quarter, [])
+                        
+                    if not original_urls:
+                        # If still no URL, we need to use the S3 file
+                        print(f"No direct URL found for {year} {quarter}, using S3 path")
+                        s3_key = f"{config['S3_BASE_FOLDER']}/{year}/{quarter.lower()}.pdf"
+                        
+                        # Create a presigned URL for the S3 object
+                        presigned_url = s3_hook.get_conn().generate_presigned_url(
+                            'get_object',
+                            Params={'Bucket': BUCKET_NAME, 'Key': s3_key},
+                            ExpiresIn=3600  # 1 hour expiration
+                        )
+                        original_url = presigned_url
+                    else:
+                        # Use the first URL from the list
+                        original_url = original_urls[0] if isinstance(original_urls, list) else original_urls
+                    
+                    print(f"Processing {year} {quarter} with original URL: {original_url}")
+                    
+                    # Create output directory for this file
+                    output_dir = os.path.join(temp_dir, f"{year}_{quarter}")
+                    os.makedirs(output_dir, exist_ok=True)
+                    
+                    # Process the PDF directly from URL using Mistral
+                    markdown_path = mistral_process_pdf(
+                        pdf_url=original_url,
+                        output_dir=output_dir
+                    )
+                    
+                    if os.path.exists(markdown_path):
+                        # Create the S3 destination key
+                        s3_dest_key = f"{S3_MISTRAL_OUTPUT}/{year}/{quarter}.md"
+                        
+                        # Upload the markdown file to S3
+                        s3_hook.load_file(
+                            filename=markdown_path,
+                            key=s3_dest_key,
+                            bucket_name=BUCKET_NAME,
+                            replace=True
+                        )
+                        
+                        print(f"Uploaded Mistral markdown for {year}/{quarter} to {s3_dest_key}")
+                        results.append({
+                            "year": year, 
+                            "quarter": quarter, 
+                            "method": "mistral", 
+                            "status": "success"
+                        })
+                    else:
+                        print(f"Error: Mistral markdown file not found at {markdown_path}")
+                        results.append({
+                            "year": year, 
+                            "quarter": quarter, 
+                            "method": "mistral", 
+                            "status": "error"
+                        })
+                    
+                except Exception as e:
+                    print(f"Error processing {year} {quarter} with Mistral: {str(e)}")
+                    results.append({
+                        "year": year, 
+                        "quarter": quarter, 
+                        "method": "mistral", 
+                        "status": "error", 
+                        "error": str(e)
+                    })
+    
+    finally:
+        # Clean up temporary directory
+        import shutil
+        shutil.rmtree(temp_dir)
+    
+    return results
+
+
+
 # Single operator for entire process
 main_operator = PythonOperator(
     task_id="nvdia_scrape_download_extract_upload",
@@ -508,7 +678,20 @@ upload_task = PythonOperator(
     provide_context=True,
     dag=dag
 )
+docling_conversion_task = PythonOperator(
+    task_id='docling_conversion',
+    python_callable=convert_pdfs_docling,
+    provide_context=True,
+    dag=dag,
+)
+
+mistral_conversion_task = PythonOperator(
+    task_id='mistral_conversion',
+    python_callable=convert_pdfs_mistral,
+    provide_context=True,
+    dag=dag,
+)
 
 
 # Set task dependencies
-main_operator >> upload_task
+main_operator >> upload_task >> [docling_conversion_task, mistral_conversion_task]

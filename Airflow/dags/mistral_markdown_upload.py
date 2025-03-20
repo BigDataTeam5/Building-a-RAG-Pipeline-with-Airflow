@@ -95,45 +95,43 @@ def list_pdf_files(**context):
 
 def convert_pdfs_mistral(**context):
     """Download PDFs from S3 and convert to markdown using Mistral"""
-    # Import dependencies inside the function
     import tempfile
     import shutil
     import sys
     from airflow.providers.amazon.aws.hooks.s3 import S3Hook
-    
+
     # Add paths for importing custom modules
     dag_folder = os.path.dirname(os.path.abspath(__file__))
     if dag_folder not in sys.path:
         sys.path.insert(0, dag_folder)
-    
+
     # Check if mistralai package is installed
     try:
-        
-     
-            from parsing_methods.mistralparsing import process_pdf as mistral_process_pdf
-            mistral_available = True
-    except ImportError:
-        print("Mistral AI package not installed. Using fallback method...")
+        from parsing_methods.mistralparsing import process_pdf as mistral_process_pdf
+        mistral_available = True
+    except ImportError as e:
+        print(f"Mistral AI package not installed: {str(e)}")
+        print("Using fallback method...")
         mistral_available = False
-    
+
     # Get config from XCom
     config = context['ti'].xcom_pull(key='config', task_ids='list_pdf_files')
     if not config:
         print("No configuration found. Cannot proceed.")
         return []
-        
+
     BUCKET_NAME = config['bucket_name']
     AWS_CONN_ID = config['aws_conn_id']
     S3_MISTRAL_OUTPUT = config['mistral_output']
-    
+
     s3_hook = S3Hook(aws_conn_id=AWS_CONN_ID)
     organized_files = context['task_instance'].xcom_pull(task_ids='list_pdf_files')
     results = []
-    
+
     if not organized_files:
         print("No PDF files found to process")
         return []
-    
+
     if not mistral_available:
         print("Mistral OCR not available. Skipping processing.")
         for year, quarters in organized_files.items():
@@ -146,7 +144,7 @@ def convert_pdfs_mistral(**context):
                     "error": "Mistral AI package not installed"
                 })
         return results
-    
+
     # Create temporary working directory
     temp_dir = tempfile.mkdtemp()
     try:
@@ -155,65 +153,60 @@ def convert_pdfs_mistral(**context):
                 # Create a directory for this file
                 file_dir = os.path.join(temp_dir, f"{year}_{quarter}")
                 os.makedirs(file_dir, exist_ok=True)
-                
+
                 # Download PDF file to temporary directory
                 local_pdf_path = os.path.join(file_dir, f"{quarter}.pdf")
-                
                 try:
-                    # Use get_key and read instead of download_file
                     print(f"Downloading {s3_key} to {local_pdf_path}")
                     s3_obj = s3_hook.get_key(key=s3_key, bucket_name=BUCKET_NAME)
-                    
-                    # Write the file contents
                     with open(local_pdf_path, 'wb') as f:
                         f.write(s3_obj.get()['Body'].read())
-                        
                     print(f"Successfully downloaded {s3_key} to {local_pdf_path}")
+
+                    # Process the PDF using Mistral with direct file upload
+                    # Only pass the local file path - no S3 dependencies
+                    markdown_path = mistral_process_pdf(local_pdf_path)
                     
-                    # Create output directory for this file
-                    pdf_base = f"extracted_{year}_{quarter}"
-                    output_dir = os.path.join(temp_dir, "ocr_output", pdf_base)
-                    os.makedirs(output_dir, exist_ok=True)
-                    
-                    # Process the PDF using Mistral
-                    try:
-                        mistral_process_pdf(local_pdf_path)
-                        
-                        # Mistral saves the output markdown in a specific location
-                        markdown_path = os.path.join(output_dir, "output.md")
-                        
-                        if os.path.exists(markdown_path):
-                            # Create the S3 destination key
-                            s3_dest_key = f"{S3_MISTRAL_OUTPUT}/{year}/{quarter}.md"
-                            
-                            # Upload the markdown file to S3
-                            s3_hook.load_file(
-                                filename=markdown_path,
-                                key=s3_dest_key,
-                                bucket_name=BUCKET_NAME,
-                                replace=True
-                            )
-                            
-                            print(f"Uploaded Mistral markdown for {year}/{quarter} to {s3_dest_key}")
-                            results.append({"year": year, "quarter": quarter, "method": "mistral", "status": "success"})
-                        else:
-                            print(f"Error: Mistral markdown file not found at {markdown_path}")
-                            results.append({"year": year, "quarter": quarter, "method": "mistral", "status": "error"})
-                    
-                    except Exception as e:
-                        print(f"Error processing {local_pdf_path} with Mistral: {str(e)}")
-                        results.append({"year": year, "quarter": quarter, "method": "mistral", "status": "error", "error": str(e)})
-                
+                    if os.path.exists(markdown_path):
+                        # Create the S3 destination key
+                        s3_dest_key = f"{S3_MISTRAL_OUTPUT}/{year}/{quarter}.md"
+                        # Upload the markdown file to S3
+                        s3_hook.load_file(
+                            filename=markdown_path,
+                            key=s3_dest_key,
+                            bucket_name=BUCKET_NAME,
+                            replace=True
+                        )
+                        print(f"Uploaded Mistral markdown for {year}/{quarter} to {s3_dest_key}")
+                        results.append({
+                            "year": year, 
+                            "quarter": quarter, 
+                            "method": "mistral", 
+                            "status": "success"
+                        })
+                    else:
+                        print(f"Error: Mistral markdown file not found at {markdown_path}")
+                        results.append({
+                            "year": year, 
+                            "quarter": quarter, 
+                            "method": "mistral", 
+                            "status": "error"
+                        })
+
                 except Exception as e:
                     print(f"Error downloading {s3_key}: {str(e)}")
-                    results.append({"year": year, "quarter": quarter, "method": "mistral", "status": "error", "error": f"Download error: {str(e)}"})
-    
+                    results.append({
+                        "year": year, 
+                        "quarter": quarter, 
+                        "method": "mistral", 
+                        "status": "error", 
+                        "error": f"Download error: {str(e)}"
+                    })
     finally:
         # Clean up temporary directory
         shutil.rmtree(temp_dir)
-    
-    return results
 
+    return results
 
 # Define the DAG tasks
 list_files_task = PythonOperator(
