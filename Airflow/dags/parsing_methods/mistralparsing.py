@@ -2,8 +2,7 @@ import os
 import time
 import requests
 from pathlib import Path
-from mistralai import Mistral
-from mistralai.models.ocr import DocumentURLChunk
+from mistralai import Mistral,DocumentURLChunk
 from dotenv import load_dotenv
 
 # Load the API key from the .env file

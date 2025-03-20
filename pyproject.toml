@@ -20,7 +20,8 @@ dependencies = [
     "fastapi (>=0.115.11,<0.116.0)",
     "python-multipart (>=0.0.20,<0.0.21)",
     "pydantic (>=2.10.6,<3.0.0)",
-    "asyncio (>=3.4.3,<4.0.0)"
+    "asyncio (>=3.4.3,<4.0.0)",
+    "chunking-evaluation @ git+https://github.com/brandonstarxel/chunking_evaluation.git"
 ]
 
 

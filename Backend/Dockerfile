@@ -7,7 +7,7 @@ WORKDIR /app
 # Copy the requirements file and install dependencies
 COPY requirements.txt .
  
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt && pip install --no-cache-dir git+https://github.com/brandonstarxel/chunking_evaluation.git
  
 # Copy the FastAPI app code into the container
 COPY . .
@@ -16,4 +16,4 @@ COPY . .
 EXPOSE 8000
  
 # Command to run the FastAPI application
-CMD ["uvicorn", "api:app", "--host", "0.0.0.0", "--port", "8080"]
+CMD ["uvicorn", "api:app", "--host", "0.0.0.0", "--port", "8000"]

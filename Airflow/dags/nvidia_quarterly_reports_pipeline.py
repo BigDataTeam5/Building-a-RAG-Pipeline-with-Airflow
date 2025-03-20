@@ -245,7 +245,7 @@ def main_task(**context):
       4) Organizes files by year folder.
       5) Stores original URLs in XCom for direct processing.
     """
-    year_range = range(2025, 2026)  # 2020 to 2025 inclusive
+    year_range = range(2020, 2026)  # 2020 to 2025 inclusive
     
     # Create base directory structure
     os.makedirs(DOWNLOAD_FOLDER, exist_ok=True)
