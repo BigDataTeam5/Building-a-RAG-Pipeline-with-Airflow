@@ -198,16 +198,34 @@ def interactive_qa():
         except Exception as e:
             print(f"Error processing query: {str(e)}")
 
-# File path to your JSON file
-json_file_path = r"output\token_chunking\chunks.json"  # Use raw string to avoid invalid escape sequence
+# Add this function to handle multiple files
+def process_multiple_files(file_paths: list[str]) -> None:
+    """Process multiple JSON files and upload their chunks to Pinecone"""
+    total_chunks = 0
+    for file_path in file_paths:
+        try:
+            print(f"\nProcessing file: {file_path}")
+            chunks = load_chunks_from_json(file_path)
+            upload_to_pinecone(chunks)
+            total_chunks += len(chunks)
+            print(f"Successfully processed {len(chunks)} chunks from {file_path}")
+        except Exception as e:
+            print(f"Error processing {file_path}: {str(e)}")
+    
+    print(f"\nTotal chunks processed across all files: {total_chunks}")
 
-# Process pipeline with error handling
-try:
-    chunks = load_chunks_from_json(json_file_path)
-    upload_to_pinecone(chunks)
-except Exception as e:
-    print(f"Error in main process: {str(e)}")
-
-# Add this at the bottom of your file to run the interactive Q&A
+# Update the main section of your code
 if __name__ == "__main__":
+    # List of JSON files to process
+    json_file_paths = [
+        r"output\token_chunking\chunks.json",
+        r"output\character_chunking\chunks.json",
+        r"output\recursive_chunking\chunks.json",
+        # Add more file paths as needed
+    ]
+
+    # Process all files first
+    process_multiple_files(json_file_paths)
+
+    # Then start the interactive Q&A
     interactive_qa()
