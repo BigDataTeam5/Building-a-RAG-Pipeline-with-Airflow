@@ -101,11 +101,6 @@ def get_nvidia_quarterly_links(year):
         print(f"Accessing {BASE_URL}")
         driver.get(BASE_URL)
         time.sleep(5)
-        
-        with open('/opt/airflow/logs/nvidia_page_source.html', 'w', encoding='utf-8') as f:
-            f.write(driver.page_source)
-        driver.save_screenshot('/opt/airflow/logs/nvidia_financial_page.png')
-        
         # Select the target year from the dropdown
         try:
             year_dropdown = driver.find_element(By.ID, "_ctrl0_ctl75_selectEvergreenFinancialAccordionYear")
@@ -113,7 +108,6 @@ def get_nvidia_quarterly_links(year):
             year_select.select_by_value(str(year))
             print(f"Selected year {year} from dropdown")
             time.sleep(3)
-            driver.save_screenshot(f'/opt/airflow/logs/nvidia_after_year_selection_{year}.png')
         except Exception as e:
             print(f"Error selecting year {year}: {str(e)}")
         
@@ -387,19 +381,12 @@ def convert_pdfs_docling(**context):
     from pathlib import Path
     from airflow.providers.amazon.aws.hooks.s3 import S3Hook
     
-    # Add paths for importing custom modules
-    dag_folder = os.path.dirname(os.path.abspath(__file__))
-    if dag_folder not in sys.path:
-        sys.path.insert(0, dag_folder)
-    
-    # Lazy import the docling module
-    try:
-        from parsing_methods.doclingparsing import main as docling_process_pdf
-        docling_available = True
-    except ImportError as e:
-        print(f"Docling package not installed: {str(e)}")
-        return []
-    
+    if '/opt/airflow' not in sys.path:
+        sys.path.insert(0, '/opt/airflow')
+  
+    from Backend.parsing_methods.doclingparsing import main as docling_process_pdf
+    docling_available = True
+    print("✅ Successfully imported Docling parsing module")
     # Load configuration
     with open('/opt/airflow/config/nvidia_config.json') as config_file:
         config = json.load(config_file)
@@ -536,7 +523,8 @@ def convert_pdfs_mistral(**context):
     import sys
     import os
     from airflow.providers.amazon.aws.hooks.s3 import S3Hook
-    
+    if '/opt/airflow' not in sys.path:
+        sys.path.insert(0, '/opt/airflow')
     # Add paths for importing custom modules
     dag_folder = os.path.dirname(os.path.abspath(__file__))
     if dag_folder not in sys.path:
@@ -560,19 +548,11 @@ def convert_pdfs_mistral(**context):
     s3_hook = S3Hook(aws_conn_id=AWS_CONN_ID)
     results = []
     
-    # Check if we got the quarterly reports
-    if not quarterly_reports_by_year:
-        print("No quarterly reports found. Cannot proceed with Mistral processing.")
-        return []
+
+    from Backend.parsing_methods.mistralparsing import process_pdf as mistral_process_pdf
+    mistral_available = True
+    print("✅ Successfully imported Mistral parsing module")
     
-    # Check if mistralai package is installed
-    try:
-        from parsing_methods.mistralparsing import process_pdf as mistral_process_pdf
-        mistral_available = True
-    except ImportError as e:
-        print(f"Mistral AI package not installed: {str(e)}")
-        mistral_available = False
-        return []
     
     # Create temporary working directory
     temp_dir = tempfile.mkdtemp()
@@ -678,12 +658,12 @@ upload_task = PythonOperator(
     provide_context=True,
     dag=dag
 )
-docling_conversion_task = PythonOperator(
-    task_id='docling_conversion',
-    python_callable=convert_pdfs_docling,
-    provide_context=True,
-    dag=dag,
-)
+# docling_conversion_task = PythonOperator(
+#     task_id='docling_conversion',
+#     python_callable=convert_pdfs_docling,
+#     provide_context=True,
+#     dag=dag,
+# )
 
 mistral_conversion_task = PythonOperator(
     task_id='mistral_conversion',
@@ -694,4 +674,4 @@ mistral_conversion_task = PythonOperator(
 
 
 # Set task dependencies
-main_operator >> upload_task >> [docling_conversion_task, mistral_conversion_task]
+main_operator >> upload_task >> [mistral_conversion_task]

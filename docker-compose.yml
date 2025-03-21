@@ -24,6 +24,9 @@ x-airflow-common:
     - ./Airflow/plugins:/opt/airflow/plugins
     - ./Airflow/requirements.txt:/opt/airflow/requirements.txt
     - ./.env:/opt/airflow/.env 
+    - ./Backend:/opt/airflow/Backend
+    - ./Rag_modelings:/opt/airflow/Rag_modelings
+    - ./chroma_db:/opt/airflow/chroma_db
   user: "${AIRFLOW_UID:-50000}:0"
   depends_on:
     redis:

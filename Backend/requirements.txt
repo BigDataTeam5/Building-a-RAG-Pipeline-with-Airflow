@@ -1,2 +1,9 @@
 fastapi
 uvicorn
+chromadb
+numpy
+scikit-learn
+nltk
+litellm
+pinecone
+tiktoken

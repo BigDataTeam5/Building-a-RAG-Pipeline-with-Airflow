@@ -177,3 +177,7 @@ cython_debug/
 output/
 ocr_output/
 log/*.png
+Q1.md
+
+# chromadb 
+chroma_db/*

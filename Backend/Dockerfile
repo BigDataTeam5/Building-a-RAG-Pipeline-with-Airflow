@@ -7,7 +7,7 @@ WORKDIR /app
 # Copy the requirements file and install dependencies
 COPY requirements.txt .
  
-RUN pip install --no-cache-dir -r requirements.txt && pip install --no-cache-dir git+https://github.com/brandonstarxel/chunking_evaluation.git
+RUN pip install --no-cache-dir -r requirements.txt
  
 # Copy the FastAPI app code into the container
 COPY . .

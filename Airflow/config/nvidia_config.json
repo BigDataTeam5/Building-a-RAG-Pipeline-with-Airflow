@@ -1,12 +1,13 @@
 {
   "AWS_CONN_ID": "aws_default",
-  "BUCKET_NAME": "rag-pipeline-with-airflow ",
+  "BUCKET_NAME": "rag-pipeline-with-airflow",
   "TEMP_DATA_FOLDER": "/opt/airflow/temp_data",
   "S3_BASE_FOLDER": "nvidia_quarterly_reports",
   "BASE_URL": "https://investor.nvidia.com/financial-info/quarterly-results/default.aspx",
   "S3_DOCLING_OUTPUT" :"docling_markdowns",
   "S3_MISTRAL_OUTPUT" : "mistral_markdowns",
   "RESULTS_FOLDER": "/opt/airflow/data/nvidia",
+  "CHROMA_DB_PATH":"/opt/airflow/chroma_db",
   "default_args": {
     "owner": "airflow",
     "depends_on_past": false,

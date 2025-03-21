@@ -40,18 +40,8 @@ RUN pip install --upgrade pip setuptools wheel
 COPY requirements.txt /tmp/requirements.txt
 
 # Install dependencies from requirements.txt
-RUN pip install --no-cache-dir -r /tmp/requirements.txt
+RUN pip install --no-cache-dir -r /tmp/requirements.txt && pip install --no-cache-dir git+https://github.com/brandonstarxel/chunking_evaluation.git
 
-# ✅ Install DBT core and DBT Snowflake explicitly with compatible versions
-RUN pip install --no-cache-dir \
-    dbt-core==1.5.7 \
-    dbt-snowflake==1.5.7 \
-    apache-airflow-providers-snowflake==5.3.1 \
-    snowflake-connector-python==3.9.1 \
-    dbt-bigquery \
-    dbt-postgres \
-    dbt-redshift \
-    dbt-duckdb
 # Switch back to root user temporarily to delete the file
 USER root
 RUN rm -f /tmp/requirements.txt

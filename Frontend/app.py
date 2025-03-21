@@ -12,19 +12,6 @@ st.set_page_config(page_title="Nvidia Quarterly data RAG", layout="wide")
 # Initialize session state variables if they do not exist
 if "file_uploaded" not in st.session_state:
     st.session_state.file_uploaded = False
-if "markdown_ready" not in st.session_state:
-    st.session_state.markdown_ready = False
-if "show_pdf_uploader" not in st.session_state:
-    st.session_state.show_pdf_uploader = False
-if "show_url_input" not in st.session_state:
-    st.session_state.show_url_input = False
-# Initialize session state for markdown history
-if "markdown_history" not in st.session_state:
-    st.session_state.markdown_history = []  # To store history of markdown files
-if "selected_markdown_content" not in st.session_state:
-    st.session_state.selected_markdown_content = None
-if "selected_markdown_name" not in st.session_state:
-    st.session_state.selected_markdown_name = None
 # Initialize session state for LLM responses
 if "summary_result" not in st.session_state:
     st.session_state.summary_result = None
@@ -34,7 +21,8 @@ if "processing_summary" not in st.session_state:
     st.session_state.processing_summary = False
 if "processing_question" not in st.session_state:
     st.session_state.processing_question = False
-
+if "similarity_metric" not in st.session_state:
+    st.session_state.similarity_metric = False
 # RAG-specific session states
 if "pdf_parser" not in st.session_state:
     st.session_state.pdf_parser = None
@@ -61,12 +49,8 @@ def update_api_endpoints():
     
     # API Endpoints
     st.session_state.UPLOAD_PDF_API = f"{base_url}/upload-pdf"
-    st.session_state.LATEST_FILE_API = f"{base_url}/get-latest-file-url"
     st.session_state.PARSE_PDF_API = f"{base_url}/parse-pdf"
-    st.session_state.CONVERT_MARKDOWN_API = f"{base_url}/convert-pdf-markdown"
-    st.session_state.FETCH_MARKDOWN_API = f"{base_url}/fetch-latest-markdown-urls"
-    st.session_state.FETCH_MARKDOWN_HISTORY = f"{base_url}/list-image-ref-markdowns"
-    st.session_state.SUMMARIZE_API = f"{base_url}/summarize"
+    st.session_state.RAG_EMBEDDING_API = f"{base_url}/rag/create-embeddings"
     st.session_state.ASK_QUESTION_API = f"{base_url}/ask-question"
     st.session_state.GET_LLM_RESULT_API = f"{base_url}/get-llm-result"
     st.session_state.LLM_MODELS_API = f"{base_url}/llm/models"
@@ -75,20 +59,19 @@ def update_api_endpoints():
     st.session_state.NVIDIA_QUARTERS_API = f"{base_url}/nvidia/quarters"
     st.session_state.RAG_QUERY_API = f"{base_url}/rag/query"
     st.session_state.RAG_CONFIG_API = f"{base_url}/rag/config"
+    st.session_state.RAG_PROCESS_PDF_EMBEDDINGS_API = f"{base_url}/rag/process-pdf-embeddings"
 
 # Initial setup of API endpoints
 update_api_endpoints()
 
-# Function to Upload File to S3 - With improved error handling
+# Function to Upload File - With updated parameters to only use PDF file and parser method
 def upload_pdf(file):
     try:
         files = {"file": (file.name, file.getvalue(), "application/pdf")}
         with st.spinner("📤 Uploading PDF... Please wait."):
-            # Include RAG configuration parameters
+            # Include only parser parameter
             params = {
-                "parser": st.session_state.pdf_parser,
-                "rag_method": st.session_state.rag_method,
-                "chunking_strategy": st.session_state.chunking_strategy
+                "parser": st.session_state.pdf_parser
             }
             response = requests.post(st.session_state.UPLOAD_PDF_API, files=files, params=params)
 
@@ -226,6 +209,32 @@ def poll_for_llm_result(job_id, max_retries=15, interval=2):
 # Fetch models at startup
 if "available_models" not in st.session_state:
     st.session_state.available_models = fetch_available_models()
+# Function to process RAG embeddings
+def process_rag_embeddings(file_id, markdown_path, rag_method, chunking_strategy):
+    try:
+        with st.spinner("⏳ Creating embeddings... This may take a moment."):
+            # Prepare the request payload
+            params = {
+                "file_id": file_id,
+                "markdown_path": markdown_path,
+                "rag_method": rag_method,
+                "chunking_strategy": chunking_strategy
+            }
+            
+            # Submit to API
+            response = requests.post(
+                st.session_state.RAG_PROCESS_PDF_EMBEDDINGS_API, 
+                params=params
+            )
+            
+            if response.status_code == 200:
+                return response.json()
+            else:
+                st.error(f"Failed to create embeddings: {response.text}")
+                return {"error": response.text}
+    except Exception as e:
+        st.error(f"Error in embedding creation: {str(e)}")
+        return {"error": str(e)}
 
 # Sidebar UI
 with st.sidebar:
@@ -238,29 +247,54 @@ with st.sidebar:
         index=0
     )
     
-    # PDF parser selection
-    pdf_parser = st.selectbox(
-        "Select PDF Parser:",
-        ["Select a parser", "Basic Parser", "Docling", "Mistral OCR"],
-        index=0
-    )
+    # Only show these options for PDF Upload
+    if data_source == "PDF Upload":
+        # PDF parser selection
+        pdf_parser = st.selectbox(
+            "Select PDF Parser:",
+            ["Select a parser", "Docling", "Mistral OCR"],
+            index=0
+        )
+        
+        # RAG method selection
+        rag_method = st.selectbox(
+            "Select RAG Method:",
+            ["Select a method", "manual_embedding", "Pinecone", "ChromaDB"],
+            index=0
+        )
+        
+        # Chunking strategy
+        chunking_strategy = st.selectbox(
+            "Select Chunking Strategy:",
+            ["Select a strategy", "characterbased_chunking","recursive_chunking", "semantic_chunking"],
+            index=0
+        )
+        
+        # LLM model selection
+        available_models = ["Select Model"] + st.session_state.available_models
+        llm_model = st.selectbox("Select LLM Model:", available_models, index=0)
+        
+        # Save selections to session state
+        st.session_state.pdf_parser = pdf_parser if pdf_parser != "Select a parser" else None
+        st.session_state.rag_method = rag_method if rag_method != "Select a method" else None
+        st.session_state.chunking_strategy = chunking_strategy if chunking_strategy != "Select a strategy" else None
+        st.session_state.llm_model = llm_model if llm_model != "Select Model" else None
     
-    # RAG method selection
-    rag_method = st.selectbox(
-        "Select RAG Method:",
-        ["Select a method", "Naive (Manual Embeddings)", "Pinecone", "ChromaDB"],
-        index=0
-    )
-    
-    # Chunking strategy
-    chunking_strategy = st.selectbox(
-        "Select Chunking Strategy:",
-        ["Select a strategy", "Fixed Size", "Semantic", "Recursive"],
-        index=0
-    )
-    
-    # If Nvidia dataset is selected, show quarter selection
-    if data_source == "Nvidia Dataset":
+    # For Nvidia Dataset, set default values
+    elif data_source == "Nvidia Dataset":
+        # Set default values for Nvidia Dataset
+        st.session_state.pdf_parser = "Mistral"  
+        st.session_state.rag_method = "ChromaDB"  
+        st.session_state.chunking_strategy = "semantic_chunking"  # Default chunking
+        st.session_state.llm_model = st.session_state.available_models[0] if st.session_state.available_models else "gpt-4"  # Default model
+        
+        # Display info about default configuration
+        st.info("**Default Configuration for Nvidia Dataset**")
+        st.info(f"• PDF Parser: {st.session_state.pdf_parser}")
+        st.info(f"• RAG Method: {st.session_state.rag_method}")
+        st.info(f"• Chunking: {st.session_state.chunking_strategy}")
+        
+        # Show quarter selection
         available_quarters = fetch_nvidia_quarters()
         if available_quarters:
             selected_quarters = st.multiselect(
@@ -270,29 +304,26 @@ with st.sidebar:
             )
             st.session_state.selected_quarters = selected_quarters
     
-    # LLM model selection
-    available_models = ["Select Model"] + st.session_state.available_models
-    llm_model = st.selectbox("Select LLM Model:", available_models, index=0)
-    
-    # Save selections to session state
+    # Save data source to session state
     st.session_state.data_source = data_source
-    st.session_state.pdf_parser = pdf_parser if pdf_parser != "Select a parser" else None
-    st.session_state.rag_method = rag_method if rag_method != "Select a method" else None
-    st.session_state.chunking_strategy = chunking_strategy if chunking_strategy != "Select a strategy" else None
-    st.session_state.llm_model = llm_model if llm_model != "Select Model" else None
-
+    
     # Apply configuration button
     if st.button("Apply Configuration"):
         if data_source == "Select an option":
             st.error("Please select a data source")
-        elif pdf_parser == "Select a parser":
-            st.error("Please select a PDF parser")
-        elif rag_method == "Select a method":
-            st.error("Please select a RAG method")
-        elif chunking_strategy == "Select a strategy":
-            st.error("Please select a chunking strategy")
-        elif llm_model == "Select Model":
-            st.error("Please select an LLM model")
+        elif data_source == "PDF Upload":
+            if pdf_parser == "Select a parser":
+                st.error("Please select a PDF parser")
+            elif rag_method == "Select a method":
+                st.error("Please select a RAG method")
+            elif chunking_strategy == "Select a strategy":
+                st.error("Please select a chunking strategy")
+            elif llm_model == "Select Model":
+                st.error("Please select an LLM model")
+            else:
+                st.success("Configuration applied successfully")
+                st.session_state.next_clicked = True
+                st.rerun()
         elif data_source == "Nvidia Dataset" and not selected_quarters:
             st.error("Please select at least one quarter")
         else:
@@ -315,6 +346,27 @@ if st.session_state.get("next_clicked", False):
             if "error" not in upload_response:
                 st.success("✅ PDF File Uploaded Successfully!")
                 st.info("The document will be processed through the RAG pipeline with your selected configuration.")
+                
+                # Display embedding button after successful upload
+                if "file_id" in upload_response and "markdown_path" in upload_response:
+                    file_id = upload_response["file_id"]
+                    markdown_path = upload_response["markdown_path"]
+                    
+                    if st.button("Process Chunking & Create Embeddings"):
+                        embedding_result = process_rag_embeddings(
+                            file_id, 
+                            markdown_path,
+                            st.session_state.rag_method,
+                            st.session_state.chunking_strategy
+                        )
+                        if "error" not in embedding_result:
+                            st.success("✅ Embeddings created successfully!")
+                            st.info("You can now ask questions about your document.")
+                            
+                            # Store the job_id for later reference
+                            st.session_state.embedding_job_id = embedding_result.get("job_id")
+                        else:
+                            st.error(f"Embedding failed: {embedding_result.get('error')}")
     
     elif st.session_state.data_source == "Nvidia Dataset":
         st.header("Query Nvidia Quarterly Reports")
@@ -343,6 +395,17 @@ if st.session_state.get("next_clicked", False):
         
         st.markdown("---")
         st.subheader("Ask Questions About the Data")
+        # Similarity metric selection
+        similarity_metric = st.selectbox(
+            "Select Similarity Metric:",
+            [
+                "cosine_similarity",
+                "euclidean_distance",
+                "dot_product" 
+            ],
+            help="Choose how similarity between text chunks will be calculated"
+        )
+        st.session_state.similarity_metric = similarity_metric
         
         user_question = st.text_area(
             "Enter your question:",

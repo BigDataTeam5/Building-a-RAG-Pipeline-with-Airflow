@@ -21,7 +21,14 @@ dependencies = [
     "python-multipart (>=0.0.20,<0.0.21)",
     "pydantic (>=2.10.6,<3.0.0)",
     "asyncio (>=3.4.3,<4.0.0)",
-    "chunking-evaluation @ git+https://github.com/brandonstarxel/chunking_evaluation.git"
+    "chunking-evaluation @ git+https://github.com/brandonstarxel/chunking_evaluation.git",
+    "matplotlib (>=3.10.1,<4.0.0)",
+    "tiktoken (>=0.9.0,<0.10.0)",
+    "scikit-learn (>=1.6.1,<2.0.0)",
+    "sentence-transformers (>=3.4.1,<4.0.0)",
+    "nltk (>=3.9.1,<4.0.0)",
+    "litellm (>=1.63.12,<2.0.0)",
+    "pinecone (>=6.0.2,<7.0.0)"
 ]
 
 

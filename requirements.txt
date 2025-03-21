@@ -7,3 +7,8 @@ docling
 boto3
 streamlit
 requests
+matplotlib
+pandas
+numpy
+tiktoken
+chromadb

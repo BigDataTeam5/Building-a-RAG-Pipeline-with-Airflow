@@ -2,11 +2,37 @@ from fastapi import FastAPI, File, UploadFile, HTTPException, BackgroundTasks, Q
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from datetime import datetime
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Any
 import os
 import uuid
 import asyncio
 from logger import api_logger, pdf_logger, error_logger, log_request, log_error
+import uvicorn
+import sys
+
+# Fix path handling for imports
+current_dir = os.path.dirname(os.path.abspath(__file__))
+project_root = os.path.dirname(current_dir)
+sys.path.insert(0, project_root)  # Add project root to path
+
+# Local imports
+from litellm_query_generator import generate_response
+from parsing_methods.doclingparsing import main as docling_parse
+from parsing_methods.mistralparsing import process_pdf as mistral_parse
+
+# Import modules with absolute paths
+from Rag_modelings.chromadb_pipeline import (
+    store_markdown_in_chromadb,
+    query_and_generate_response as chromadb_query
+)
+from Rag_modelings.rag_pinecone import (
+    query_pinecone_rag,  # Changed from run_rag_pipeline to query_pinecone_rag
+    initialize_connections,
+    prepare_vectors_for_upload,
+    upload_vectors_to_pinecone,
+    process_document_with_chunking,
+)
+
 
 # Initialize FastAPI app
 app = FastAPI(title="RAG Pipeline API")
@@ -22,10 +48,13 @@ app.add_middleware(
 
 # Storage paths
 UPLOAD_DIR = "uploads"
+MARKDOWN_DIR = "user_markdowns"
 os.makedirs(UPLOAD_DIR, exist_ok=True)
+os.makedirs(MARKDOWN_DIR, exist_ok=True)
 
-# In-memory job storage
+# In-memory storage
 job_store = {}
+embedding_store = {}
 
 # Pydantic models
 class DateRequest(BaseModel):
@@ -39,6 +68,28 @@ class RAGRequest(BaseModel):
     rag_method: Optional[str] = None
     chunking_strategy: Optional[str] = None
     quarters: Optional[List[str]] = None
+
+class EmbeddingRequest(BaseModel):
+    markdown_path: str
+    rag_method: str  # "chromadb" or "pinecone"
+    chunking_strategy: Optional[str] = "Semantic Chuking(Kamradt Method)"
+    embedding_model: Optional[str] = "all-MiniLM-L6-v2"
+
+class ManualEmbeddingRequest(BaseModel):
+    text: str
+    embedding_id: str
+    rag_method: str  # "chromadb" or "pinecone"
+    chunking_strategy: Optional[str] = "Semantic Chuking(Kamradt Method)"
+    metadata: Optional[Dict[str, Any]] = None
+
+class QueryRequest(BaseModel):
+    query: str
+    embedding_id: Optional[str] = None  # For manual embeddings
+    markdown_path: Optional[str] = None  # For stored markdown files
+    rag_method: str  # "chromadb" or "pinecone"
+    model_id: str = "gpt4o"
+    similarity_metric: Optional[str] = "cosine"
+    top_k: Optional[int] = 5
 
 # Function to determine the quarter
 def get_quarter(date: str) -> str:
@@ -67,7 +118,7 @@ def get_year_quarter(date_request: DateRequest):
 @app.post("/upload-pdf")
 async def upload_pdf(
     file: UploadFile = File(...),
-    parser: Optional[str] = Query(None),
+    parser: str = Query("docling"),  
     rag_method: Optional[str] = Query(None),
     chunking_strategy: Optional[str] = Query(None)
 ):
@@ -86,10 +137,33 @@ async def upload_pdf(
         
         pdf_logger.info(f"File saved to {file_path}")
         
-        # Return success response
+        # Create markdown output directory
+        markdown_dir = "user_markdowns"
+        os.makedirs(markdown_dir, exist_ok=True)
+        markdown_filename = os.path.splitext(os.path.basename(file.filename))[0] + ".md"
+        markdown_path = os.path.join(markdown_dir, markdown_filename)
+        
+        # Use the appropriate parser based on user selection
+        if parser.lower() == "docling":
+            pdf_logger.info(f"Starting Docling conversion for {file.filename}")
+            # Call docling_parse with just the file path
+            docling_parse(file_path)
+            parser_name = "Docling"
+        elif parser.lower() == "mistral ocr" or parser.lower() == "mistral":
+            pdf_logger.info(f"Starting Mistral OCR conversion for {file.filename}")
+            # Call mistral_parse with just the file path
+            mistral_parse(file_path)
+            parser_name = "Mistral OCR"
+        else:
+            raise HTTPException(status_code=400, detail=f"Unsupported parser: {parser}")
+        
+        pdf_logger.info(f"{parser_name} conversion completed for {file.filename}")
+        
+        # Return success response with PDF and markdown info
         return {
             "filename": file.filename,
             "saved_as": file_path,
+            "file_id": file_id,  # Include file_id for reference in further processing
             "parser": parser,
             "rag_method": rag_method,
             "chunking_strategy": chunking_strategy,
@@ -124,30 +198,63 @@ async def get_available_models():
     return {"models": models}
 
 @app.post("/rag/query")
-async def rag_query(request: RAGRequest, background_tasks: BackgroundTasks):
+async def rag_query(request: QueryRequest):
+    """Query the RAG system using the specified method and model"""
     try:
-        log_request(f"RAG Query: {request.question}, Model: {request.model}, Quarters: {request.quarters}")
+        log_request(f"RAG Query: {request.query}, Method: {request.rag_method}, Model: {request.model_id}")
         
-        # Initialize the job with a pending status
-        job_store[request.request_id] = {
-            "status": "processing",
-            "question": request.question,
-            "model": request.model
-        }
+        result = None
         
-        # Process the query in the background
-        background_tasks.add_task(
-            process_rag_query, 
-            request.request_id, 
-            request.question, 
-            request.model,
-            request.parser,
-            request.rag_method,
-            request.chunking_strategy,
-            request.quarters
-        )
+        # Handle manual embeddings
+        if request.embedding_id and request.embedding_id in embedding_store:
+            embedding_data = embedding_store[request.embedding_id]
+            chunks = embedding_data["chunks"]
+            
+            # Use LiteLLM to generate response directly
+            response = generate_response(
+                chunks=chunks,
+                query=request.query,
+                model_id=request.model_id,
+                metadata=[embedding_data["metadata"] for _ in chunks]
+            )
+            
+            result = {
+                "answer": response.get("answer", "Error generating response"),
+                "usage": response.get("usage", {}),
+                "source": f"Manual embedding (ID: {request.embedding_id})",
+                "chunks_used": len(chunks)
+            }
         
-        return {"request_id": request.request_id, "status": "submitted"}
+        # Handle ChromaDB
+        elif request.rag_method.lower() == "chromadb":
+            result = chromadb_query(
+                query=request.query,
+                similarity_metric=request.similarity_metric,
+                llm_model=request.model_id,
+                top_k=request.top_k
+            )
+        
+        # Handle Pinecone
+        elif request.rag_method.lower() == "pinecone":
+            # Use query_pinecone_rag instead of run_rag_pipeline
+            response = query_pinecone_rag(
+                query=request.query,
+                model_id=request.model_id,
+                similarity_metric=request.similarity_metric  # Pass similarity_metric from request
+            )
+            
+            # Format the result to match the expected structure
+            result = {
+                "answer": response.get("answer", "Error generating response"),
+                "usage": response.get("usage", {}),
+                "sources": response.get("sources", []),
+                "similarity_metric_used": response.get("similarity_metric_used", "cosine")
+            }
+        
+        else:
+            raise HTTPException(status_code=400, detail=f"Unsupported RAG method: {request.rag_method}")
+        
+        return result
     except Exception as e:
         log_error(f"Error processing RAG query", e)
         raise HTTPException(status_code=500, detail=str(e))
@@ -181,44 +288,186 @@ async def set_rag_config(parser: str, rag_method: str, chunking_strategy: str):
         log_error(f"Error setting RAG config", e)
         raise HTTPException(status_code=500, detail=str(e))
 
-# Background processing function
-async def process_rag_query(
-    request_id: str, 
-    question: str, 
-    model: str,
-    parser: Optional[str], 
-    rag_method: Optional[str], 
-    chunking_strategy: Optional[str],
-    quarters: Optional[List[str]]
+# New endpoint for creating embeddings from markdown
+@app.post("/rag/create-embeddings")
+async def create_embeddings(request: EmbeddingRequest, background_tasks: BackgroundTasks):
+    """Create embeddings from a markdown file using ChromaDB or Pinecone"""
+    try:
+        log_request(f"Creating embeddings for {request.markdown_path} using {request.rag_method}")
+        
+        # Verify the markdown file exists
+        markdown_path = request.markdown_path
+        if not os.path.exists(markdown_path):
+            markdown_path = os.path.join(MARKDOWN_DIR, os.path.basename(request.markdown_path))
+            if not os.path.exists(markdown_path):
+                raise HTTPException(status_code=404, detail=f"Markdown file not found: {request.markdown_path}")
+        
+        # Create a job ID
+        job_id = str(uuid.uuid4())
+        
+        # Initialize job status
+        job_store[job_id] = {
+            "status": "processing",
+            "markdown_path": markdown_path,
+            "rag_method": request.rag_method,
+            "chunking_strategy": request.chunking_strategy
+        }
+        
+        # Process embeddings in the background
+        background_tasks.add_task(
+            process_embeddings,
+            job_id,
+            markdown_path,
+            request.rag_method,
+            request.chunking_strategy,
+            request.embedding_model
+        )
+        
+        return {
+            "job_id": job_id,
+            "status": "processing",
+            "message": f"Creating embeddings for {os.path.basename(markdown_path)} using {request.rag_method}"
+        }
+    except Exception as e:
+        log_error(f"Error creating embeddings", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/rag/manual-embedding")
+async def create_manual_embedding(request: ManualEmbeddingRequest):
+    """Create embeddings from text provided directly by the user"""
+    try:
+        log_request(f"Creating manual embedding with ID {request.embedding_id}")
+        
+        # Set default metadata if not provided
+        metadata = request.metadata or {
+            "source": "manual_input",
+            "timestamp": datetime.now().isoformat()
+        }
+        
+        # Apply chunking
+        chunks = process_document_with_chunking(request.text, request.chunking_strategy)
+        
+        # Store in embedding_store for later use
+        embedding_store[request.embedding_id] = {
+            "chunks": chunks,
+            "rag_method": request.rag_method,
+            "chunking_strategy": request.chunking_strategy,
+            "metadata": metadata,
+            "timestamp": datetime.now().isoformat()
+        }
+        
+        return {
+            "embedding_id": request.embedding_id,
+            "chunks_count": len(chunks),
+            "rag_method": request.rag_method,
+            "status": "completed"
+        }
+    except Exception as e:
+        log_error(f"Error creating manual embedding", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/rag/job-status/{job_id}")
+async def get_job_status(job_id: str):
+    """Get the status of an embedding job"""
+    if job_id not in job_store:
+        raise HTTPException(status_code=404, detail="Job not found")
+    
+    return job_store[job_id]
+
+@app.get("/rag/embeddings")
+async def list_embeddings():
+    """List all manual embeddings stored in memory"""
+    return {
+        "embeddings": [
+            {
+                "id": k,
+                "chunks_count": len(v["chunks"]),
+                "rag_method": v["rag_method"],
+                "timestamp": v["timestamp"]
+            } 
+            for k, v in embedding_store.items()
+        ]
+    }
+
+# Background task for processing embeddings
+async def process_embeddings(
+    job_id: str,
+    markdown_path: str,
+    rag_method: str,
+    chunking_strategy: str,
+    embedding_model: str = None 
 ):
     try:
-        # Simulate processing time
-        await asyncio.sleep(3)
+        # Read markdown content
+        with open(markdown_path, 'r', encoding='utf-8') as f:
+            markdown_content = f.read()
         
-        # In a real implementation, this would:
-        # 1. Call the appropriate RAG implementation based on configuration
-        # 2. Get chunks from the vector store
-        # 3. Send to LLM and format response
-        
-        # Update job with completed results
-        job_store[request_id] = {
-            "status": "completed",
-            "answer": f"This is a simulated answer to: '{question}' using {model}.",
-            "sources": [
-                {"document": f"NVIDIA-{q}", "text": f"Sample text from {q} report"} 
-                for q in (quarters or ["2023q4"])
-            ]
+        # Extract file information
+        file_name = os.path.basename(markdown_path)
+        source_info = {
+            "file_name": file_name,
+            "file_path": markdown_path,
         }
         
-        api_logger.info(f"Completed processing request {request_id}")
+        # Process with ChromaDB
+        if rag_method.lower() == "chromadb":
+            result = store_markdown_in_chromadb(
+                markdown_content,
+                chunking_strategy,
+                embedding_model=embedding_model,
+                source_info=source_info
+            )
+            
+            # Update job status
+            job_store[job_id].update({
+                "status": "completed" if result["status"] == "success" else "failed",
+                "chunks_total": result.get("chunks_total", 0),
+                "collection_name": result.get("collection_name", None),
+                "chunking_strategy": chunking_strategy,
+                "embedding_model": embedding_model,
+                "error": result.get("error_message", None)
+            })
+        
+        # Process with Pinecone
+        elif rag_method.lower() == "pinecone":
+            # Initialize Pinecone
+            client, _, index, _ = initialize_connections()
+            
+            # Use process_document_with_chunking instead of chunk_document
+            chunks = process_document_with_chunking(markdown_content, chunking_strategy)
+            
+            # Format chunks for Pinecone
+            formatted_chunks = [
+                {"text": chunk, "file_path": markdown_path, "id": str(uuid.uuid4())} 
+                for chunk in chunks
+            ]
+            
+            # Generate and upload vectors
+            vectors = prepare_vectors_for_upload(formatted_chunks, client)
+            uploaded = upload_vectors_to_pinecone(vectors, index)
+            
+            # Update job status
+            job_store[job_id].update({
+                "status": "completed",
+                "chunks_total": len(chunks),
+                "vectors_uploaded": uploaded,
+                "chunking_strategy": chunking_strategy
+            })
+        
+        else:
+            job_store[job_id].update({
+                "status": "failed",
+                "error": f"Unsupported RAG method: {rag_method}"
+            })
+            
     except Exception as e:
-        log_error(f"Error in background RAG processing for {request_id}", e)
+        api_logger.error(f"Error processing embeddings: {str(e)}")
         # Update job with error status
-        job_store[request_id] = {
+        job_store[job_id].update({
             "status": "failed",
             "error": str(e)
-        }
+        })
 
 if __name__ == "__main__":
-    import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
+

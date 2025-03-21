@@ -38,7 +38,7 @@ from chunk_visualizer import (
 os.makedirs("output", exist_ok=True)
 
 # Load the sample document
-with open("177440d5-3b32-4185-8cc8-95500a9dc783-with-images.md", 'r', encoding='utf-8') as file:
+with open("Q2.md", 'r', encoding='utf-8') as file:
     document = file.read()
 
 # Print the first 500 characters to see what we're working with
