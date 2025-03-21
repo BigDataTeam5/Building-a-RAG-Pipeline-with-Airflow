@@ -218,9 +218,9 @@ def process_multiple_files(file_paths: list[str]) -> None:
 if __name__ == "__main__":
     # List of JSON files to process
     json_file_paths = [
-        r"output\token_chunking\chunks.json",
-        r"output\character_chunking\chunks.json",
-        r"output\recursive_chunking\chunks.json",
+        r"..\output\token_chunking\chunks.json",
+        r"..\output\character_chunking\chunks.json",
+        r"..\output\recursive_chunking\chunks.json",
         # Add more file paths as needed
     ]
 

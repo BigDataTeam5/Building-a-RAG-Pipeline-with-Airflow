@@ -197,25 +197,7 @@ async def rag_query(request: QueryRequest):
         result = None
         
         # Handle manual embeddings
-        if request.rag_method.lower() == "manual_embedding":
-            # For manual embedding method, we'll use LiteLLM to generate a response
-            # without retrieval since there may not be specific content to reference
-            response = generate_response(
-                chunks=["This is a direct query without retrieval."],  # Placeholder
-                query=request.query,
-                model_id=request.model_id,
-                metadata=[{"source": "direct_query"}]
-            )
-            
-            result = {
-                "answer": response.get("answer", "Error generating response"),
-                "usage": response.get("usage", {}),
-                "source": "Manual embedding (direct query)",
-                "chunks_used": 1
-            }
-        
-        # Handle manual embeddings
-        elif request.embedding_id and request.embedding_id in embedding_store:
+        if request.embedding_id and request.embedding_id in embedding_store:
             embedding_data = embedding_store[request.embedding_id] 
             chunks = embedding_data["chunks"]
             
@@ -441,29 +423,64 @@ async def process_embeddings(
         
         # Process with Pinecone
         elif rag_method.lower() == "pinecone":
-            # Initialize Pinecone
-            client, _, index, _ = initialize_connections()
-            
-            # Use process_document_with_chunking instead of chunk_document
-            chunks = process_document_with_chunking(markdown_content, chunking_strategy)
-            
-            # Format chunks for Pinecone
-            formatted_chunks = [
-                {"text": chunk, "file_path": markdown_path, "id": str(uuid.uuid4())} 
-                for chunk in chunks
-            ]
-            
-            # Generate and upload vectors
-            vectors = prepare_vectors_for_upload(formatted_chunks, client)
-            uploaded = upload_vectors_to_pinecone(vectors, index)
-            
-            # Update job status
-            job_store[job_id].update({
-                "status": "completed",
-                "chunks_total": len(chunks),
-                "vectors_uploaded": uploaded,
-                "chunking_strategy": chunking_strategy
-            })
+            try:
+                # Initialize Pinecone with logging
+                api_logger.info("Initializing Pinecone connection...")
+                client, _, index, _ = initialize_connections()
+                api_logger.info(f"Successfully connected to Pinecone index")
+                
+                # Process document with chunking
+                api_logger.info(f"Processing document with {chunking_strategy} strategy...")
+                chunks = process_document_with_chunking(markdown_content, chunking_strategy)
+                
+                if not chunks:
+                    raise ValueError("No chunks were generated from the document")
+                    
+                api_logger.info(f"Generated {len(chunks)} chunks from document")
+                
+                # Format chunks for Pinecone with metadata
+                formatted_chunks = []
+                for chunk in chunks:
+                    chunk_id = str(uuid.uuid4())
+                    formatted_chunks.append({
+                        "id": chunk_id,
+                        "text": chunk,
+                        "file_path": markdown_path,
+                        "file_name": os.path.basename(markdown_path),
+                        "chunking_strategy": chunking_strategy,
+                        "timestamp": datetime.now().isoformat()
+                    })
+                
+                api_logger.info(f"Preparing vectors for {len(formatted_chunks)} chunks...")
+                vectors = prepare_vectors_for_upload(formatted_chunks, client)
+                
+                if not vectors:
+                    raise ValueError("No vectors were generated from the chunks")
+                    
+                api_logger.info(f"Uploading {len(vectors)} vectors to Pinecone...")
+                uploaded = upload_vectors_to_pinecone(vectors, index)
+                
+                # Update job status with detailed information
+                job_store[job_id].update({
+                    "status": "completed",
+                    "chunks_total": len(chunks),
+                    "vectors_uploaded": uploaded,
+                    "chunking_strategy": chunking_strategy,
+                    "timestamp": datetime.now().isoformat(),
+                    "file_name": os.path.basename(markdown_path)
+                })
+                
+                api_logger.info(f"Successfully processed document: {uploaded} vectors uploaded")
+                
+            except Exception as e:
+                error_msg = f"Error processing document with Pinecone: {str(e)}"
+                api_logger.error(error_msg)
+                job_store[job_id].update({
+                    "status": "failed",
+                    "error": error_msg,
+                    "timestamp": datetime.now().isoformat()
+                })
+                raise HTTPException(status_code=500, detail=error_msg)
         
         else:
             job_store[job_id].update({

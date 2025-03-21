@@ -20,7 +20,7 @@ import pandas as pd
 from chromadb.utils import embedding_functions
 from chunking_evaluation.utils import openai_token_count
 from dotenv import load_dotenv
-
+import sys
 # Load environment variables
 load_dotenv()
 
@@ -28,8 +28,6 @@ load_dotenv()
 # Import our custom visualization helper
 from chunk_visualizer import (
     visualize_chunks_html, 
-    analyze_chunks_stats, 
-    plot_chunk_stats, 
     save_chunks_to_json,
     setup_chunking_output
 )
@@ -38,7 +36,7 @@ from chunk_visualizer import (
 os.makedirs("output", exist_ok=True)
 
 # Load the sample document
-with open("Q2.md", 'r', encoding='utf-8') as file:
+with open("..\..\Q1.md", 'r', encoding='utf-8') as file:
     document = file.read()
 
 # Print the first 500 characters to see what we're working with
@@ -129,7 +127,6 @@ else:
     
     kamradt_chunks = kamradt_chunker.split_text(document)
     analyze_chunks(kamradt_chunks, use_tokens=True)
-    
     # Save chunks to JSON
     save_chunks_to_json(kamradt_chunks, strategy_name)
     

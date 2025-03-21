@@ -37,7 +37,7 @@ from chunk_visualizer import (
 os.makedirs("output", exist_ok=True)
 
 # Load the sample document
-file_path = "177440d5-3b32-4185-8cc8-95500a9dc783-with-images.md"
+file_path = "../../Q1.md"
 with open(file_path, 'r', encoding='utf-8') as file:
     document = file.read()
 

@@ -12,6 +12,10 @@ import nltk
 import time
 
 # from chunking_markdowns import chunk_document
+# Fix path handling for imports
+current_dir = os.path.dirname(os.path.abspath(__file__))
+project_root = os.path.dirname(current_dir)
+sys.path.insert(0, project_root)  # Add project root to path
 
 # Add parent directory to path to import litellm_query_generator
 from Backend.litellm_query_generator import generate_response, MODEL_CONFIGS

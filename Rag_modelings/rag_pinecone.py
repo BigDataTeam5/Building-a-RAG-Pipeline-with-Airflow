@@ -561,5 +561,23 @@ def run_rag_pipeline(query="What is Nvidia?", model_id="gpt4o", similarity_metri
         return {"error": str(e)}
     # Entry point
 if __name__ == "__main__":
-    default_file_path = r"output\kamradt_chunking\chunks.json"
-    run_rag_pipeline(default_file_path)
+   # Test text
+    test_text = """
+    This is a test document.
+    It has multiple paragraphs.
+
+    This is another paragraph.
+    """
+
+    # Test each chunking strategy
+    strategies = [
+        "Character-Based Chunking",
+        "Recursive Character/Token Chunking", 
+        "Semantic Chuking(Kamradt Method)"
+    ]
+
+    for strategy in strategies:
+        chunks = process_document_with_chunking(test_text, strategy)
+        print(f"\nStrategy: {strategy}")
+        print(f"Number of chunks: {len(chunks)}")
+        print("First chunk preview:", chunks[0][:100] if chunks else "No chunks created")
