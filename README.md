@@ -5,7 +5,7 @@ We are enhancing the **LLM Extractor Project** in this organization to implement
 ---
 
 ## 📌 Overview
-![diagram](https://github.com/user-attachments/assets/b5dd3a20-ecad-4f36-a4ae-c146b7d6a334)
+![alt text](image.png)
 
 
 This project implements a Retrieval-Augmented Generation (RAG) pipeline using **Apache Airflow** for orchestrating data pipelines and **FastAPI + Streamlit** for interactive user interfaces.  
