@@ -23,7 +23,7 @@ except LookupError:
     nltk.download('punkt')
 
 # ChromaDB settings
-CHROMA_DB_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "chroma_db")
+CHROMA_DB_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), "chroma_db")
 COLLECTION_NAME = "chromadb_embeddings"
 
 # Embedding models
@@ -190,7 +190,6 @@ def create_or_clear_collection(client, collection_name: str, embedding_dim: int)
 def store_chunks_in_chromadb(
     chunks: List[str], 
     source_info: Dict[str, Any],
-    similarity_metric: str = "cosine",
     embedding_model_name: str = "all-MiniLM-L6-v2"
 ) -> Tuple[str, int]:
     """
@@ -199,7 +198,6 @@ def store_chunks_in_chromadb(
     Args:
         chunks: List of text chunks
         source_info: Dictionary with source information
-        similarity_metric: Similarity metric to use (used for metadata only)
         embedding_model_name: Name of embedding model to use
         
     Returns:
@@ -231,8 +229,7 @@ def store_chunks_in_chromadb(
             "chunk_index": i,
             "year": source_info.get("year", "unknown"),
             "quarter": source_info.get("quarter", "unknown"),
-            "embedding_model": embedding_model_name,
-            "preferred_similarity": similarity_metric
+            "embedding_model": embedding_model_name
         }
         for i in range(len(chunks))
     ]
@@ -256,15 +253,6 @@ def retrieve_relevant_chunks(
 ) -> Tuple[List[str], List[Dict[str, Any]]]:
     """
     Retrieve relevant chunks based on query.
-    
-    Args:
-        query: Query string
-        similarity_metric: Similarity metric to use at query time
-        embedding_model_name: Name of embedding model to use
-        top_k: Number of results to return
-        
-    Returns:
-        Tuple of chunks and their metadata
     """
     # Initialize embedding model
     model = SentenceTransformer(EMBEDDING_MODELS[embedding_model_name])
@@ -279,13 +267,10 @@ def retrieve_relevant_chunks(
         # Get collection
         collection = client.get_collection(name=COLLECTION_NAME)
         
-        # Query collection with specified similarity metric
         results = collection.query(
             query_embeddings=[query_embedding],
             n_results=top_k,
-            include=["documents", "metadatas", "distances"],
-            # Apply similarity metric at query time
-            query_params={"hnsw:space": similarity_metric}
+            include=["documents", "metadatas", "distances"]
         )
         
         chunks = results["documents"][0]
@@ -301,11 +286,10 @@ def retrieve_relevant_chunks(
     except Exception as e:
         print(f"Error retrieving chunks: {e}")
         return [], []
-
+    
 def store_markdown_in_chromadb(
     markdown_content: str,
     chunking_strategy: str = "Semantic Chuking(Kamradt Method)",
-    similarity_metric: str = "cosine",
     embedding_model_name: str = "all-MiniLM-L6-v2",
     source_info: Optional[Dict[str, Any]] = None
 ) -> Dict[str, Any]:
@@ -315,7 +299,6 @@ def store_markdown_in_chromadb(
     Args:
         markdown_content: Markdown content to process
         chunking_strategy: Chunking strategy to use
-        similarity_metric: Similarity metric to use (for metadata)
         embedding_model_name: Embedding model to use
         source_info: Source information (file name, path, etc.)
         
@@ -342,7 +325,6 @@ def store_markdown_in_chromadb(
         collection_name, num_stored = store_chunks_in_chromadb(
             chunks, 
             source_info, 
-            similarity_metric, 
             embedding_model_name
         )
         
@@ -353,7 +335,6 @@ def store_markdown_in_chromadb(
             "chunks_stored": num_stored,
             "source_info": source_info,
             "chunking_strategy": chunking_strategy,
-            "similarity_metric": similarity_metric,
             "embedding_model": embedding_model_name
         }
     
@@ -371,7 +352,9 @@ def query_and_generate_response(
     similarity_metric: str = "cosine",
     embedding_model_name: str = "all-MiniLM-L6-v2",
     llm_model: str = "gpt4o",
-    top_k: int = 5
+    top_k: int = 5,
+    data_source: str = None,
+    quarters: List[str] = None
 ) -> Dict[str, Any]:
     """
     Retrieve relevant chunks from ChromaDB and generate a response.
@@ -382,64 +365,139 @@ def query_and_generate_response(
         embedding_model_name: Embedding model to use
         llm_model: LLM model to use for response generation
         top_k: Number of chunks to retrieve
+        data_source: Source of data (e.g., "Nvidia Dataset")
+        quarters: List of quarters to filter by (e.g., ["2020Q1", "2021Q3"])
         
     Returns:
         Dictionary with response and metadata
     """
     try:
-        # Step 1: Retrieve relevant chunks
-        print(f"Retrieving relevant chunks for query: '{query}'")
-        relevant_chunks, chunk_metadatas = retrieve_relevant_chunks(
-            query, 
-            similarity_metric, 
-            embedding_model_name, 
-            top_k
-        )
+        # Step 1: Determine which collection to use
+        collection_name = "nvidia_embeddings" if data_source == "Nvidia Dataset" else COLLECTION_NAME
+        print(f"Using collection: {collection_name} for data source: {data_source}")
         
-        if not relevant_chunks:
+        # Initialize embedding model
+        model = SentenceTransformer(EMBEDDING_MODELS[embedding_model_name])
+        
+        # Generate query embedding
+        query_embedding = model.encode(query).tolist()
+        
+        # Set up ChromaDB client
+        client = chromadb.PersistentClient(path=CHROMA_DB_PATH)
+        
+        try:
+            # Get collection
+            collection = client.get_collection(name=collection_name)
+            
+            # Prepare where clause for filtering if using Nvidia dataset
+            where_filter = None
+            if data_source == "Nvidia Dataset" and quarters:
+                # Parse quarters into year and quarter components
+                where_conditions = []
+                for quarter_str in quarters:
+                    # Handle different possible formats (2020Q1, 2020q1, 2020-Q1)
+                    quarter_str = quarter_str.upper().replace('-', '')
+                    if 'Q' in quarter_str:
+                        year, quarter = quarter_str.split('Q')
+                    else:
+                        # Format like 2020q1
+                        year = quarter_str[:4]
+                        quarter = f"Q{quarter_str[5:]}"
+                    
+                    where_conditions.append({
+                        "$and": [
+                            {"Year": year},
+                            {"Quarter": f"Q{quarter}"}
+                        ]
+                    })
+                
+               # FIX: Handle single condition differently
+                if len(where_conditions) == 1:
+                    # Use the single condition directly without $or
+                    where_filter = where_conditions[0]
+                    print(f"Applying single filter: {where_filter}")
+                elif len(where_conditions) > 1:
+                    # Use $or for multiple conditions
+                    where_filter = {"$or": where_conditions}
+                    print(f"Applying multi-filter: {where_filter}")
+            
+            # Query collection with filtering by quarters if needed
+            if where_filter:
+                results = collection.query(
+                    query_embeddings=[query_embedding],
+                    n_results=top_k,
+                    include=["documents", "metadatas", "distances"],
+                    where=where_filter
+                )
+            else:
+                results = collection.query(
+                    query_embeddings=[query_embedding],
+                    n_results=top_k,
+                    include=["documents", "metadatas", "distances"]
+                )
+            
+            chunks = results["documents"][0]
+            metadatas = results["metadatas"][0]
+            distances = results["distances"][0]
+            
+            # Add distance score to metadata
+            for i, metadata in enumerate(metadatas):
+                metadata["similarity_score"] = float(distances[i])
+                metadata["similarity_metric_used"] = similarity_metric
+            
+            if not chunks:
+                return {
+                    "response": "No relevant information found for your query in the selected quarters.",
+                    "chunks_retrieved": 0,
+                    "sources": []
+                }
+                
+            # Step 2: Generate response using LiteLLM
+            print(f"Generating response using {llm_model} with {len(chunks)} chunks...")
+            
+            # Use generate_response function from litellm_query_generator
+            llm_response = generate_response(
+                chunks=chunks,
+                query=query,
+                model_id=llm_model,
+                metadata=metadatas
+            )
+            
+            # Extract response and usage information
+            response_content = llm_response.get("answer", "Error generating response")
+            token_usage = llm_response.get("usage", {})
+            
+            # Format sources for response
+            sources = []
+            for i, metadata in enumerate(metadatas):
+                source_info = {
+                    "source": metadata.get("source", "Unknown"),
+                    "similarity": metadata.get("similarity_score", 0.0),
+                    "document": f"{metadata.get('file_name', 'Unknown')}",
+                    "year": metadata.get("year", "Unknown"),
+                    "quarter": metadata.get("quarter", "Unknown"),
+                    "text": chunks[i][:200] + "..." if len(chunks[i]) > 200 else chunks[i]
+                }
+                sources.append(source_info)
+            
+            # Prepare final response
+            result = {
+                "response": response_content,
+                "chunks_retrieved": len(chunks),
+                "sources": sources,
+                "token_usage": token_usage,
+                "collection_used": collection_name
+            }
+            
+            return result
+        
+        except Exception as e:
+            print(f"Error retrieving from collection {collection_name}: {e}")
             return {
-                "response": "No relevant chunks found for your query. Please try a different query or chunking strategy.",
+                "response": f"Error retrieving information: {str(e)}",
                 "chunks_retrieved": 0,
                 "sources": []
             }
-        
-        # Step 2: Generate response using LiteLLM (directly using chunks)
-        print(f"Generating response using {llm_model}...")
-        
-        # Use the updated create_llm_response_from_chunks function to generate the response
-        llm_response = generate_response(
-            chunks=relevant_chunks,
-            query=query,
-            model_id=llm_model,
-            metadata=chunk_metadatas
-        )
-        
-        # Extract response and usage information
-        response_content = llm_response.get("answer", "Error generating response")
-        token_usage = llm_response.get("usage", {})
-        
-        # Format sources for response
-        sources = []
-        for metadata in chunk_metadatas:
-            source_info = {
-                "source": metadata.get("source", "Unknown"),
-                "similarity": metadata.get("similarity_score", 0.0),
-                "year": metadata.get("year", "Unknown"),
-                "quarter": metadata.get("quarter", "Unknown")
-            }
-            sources.append(source_info)
-        
-        # Prepare final response
-        result = {
-            "response": response_content,
-            "chunks_retrieved": len(relevant_chunks),
-            "sources": sources,
-            "token_usage": token_usage,
-            "similarity_metric_used": similarity_metric,
-            "collection_used": COLLECTION_NAME
-        }
-        
-        return result
     
     except Exception as e:
         print(f"Error in RAG pipeline: {e}")
@@ -448,7 +506,7 @@ def query_and_generate_response(
             "chunks_retrieved": 0,
             "sources": []
         }
-
+    
 # For testing
 if __name__ == "__main__":
     import argparse
@@ -512,7 +570,6 @@ if __name__ == "__main__":
     storage_result = store_markdown_in_chromadb(
         markdown_content,
         args.chunking,
-        args.similarity,
         args.embedding,
         source_info
     )

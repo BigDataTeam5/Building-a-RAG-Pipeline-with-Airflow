@@ -181,3 +181,5 @@ Q1.md
 
 # chromadb 
 chroma_db/*
+uploads/
+*.md

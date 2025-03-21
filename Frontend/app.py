@@ -6,6 +6,8 @@ import os
 import json
 import uuid
 import toml
+import re
+
 # Streamlit UI
 st.set_page_config(page_title="Nvidia Quarterly data RAG", layout="wide")
 
@@ -59,7 +61,7 @@ def update_api_endpoints():
     st.session_state.NVIDIA_QUARTERS_API = f"{base_url}/nvidia/quarters"
     st.session_state.RAG_QUERY_API = f"{base_url}/rag/query"
     st.session_state.RAG_CONFIG_API = f"{base_url}/rag/config"
-    st.session_state.RAG_PROCESS_PDF_EMBEDDINGS_API = f"{base_url}/rag/process-pdf-embeddings"
+
 
 # Initial setup of API endpoints
 update_api_endpoints()
@@ -102,45 +104,100 @@ def fetch_nvidia_quarters():
         st.warning(f"Error fetching quarters: {str(e)}")
         return []
 
+# Function to sanitize index name for Pinecone - Enhanced version
+def sanitize_index_name(name):
+    """
+    Sanitize index name to match Pinecone requirements:
+    - Lowercase alphanumeric characters or hyphens only
+    - Replace spaces and invalid characters with hyphens
+    - Make sure it's a valid name
+    - Ensure the name is within allowed length
+    """
+    if not name or not isinstance(name, str):
+        return "default-index"
+    
+    # Convert to lowercase
+    sanitized = name.lower()
+    
+    # Replace all non-alphanumeric characters (except hyphens) with hyphens
+    sanitized = re.sub(r'[^a-z0-9-]', '-', sanitized)
+    
+    # Replace multiple consecutive hyphens with a single hyphen
+    sanitized = re.sub(r'-+', '-', sanitized)
+    
+    # Remove leading and trailing hyphens
+    sanitized = sanitized.strip('-')
+    
+    # Ensure we have a valid name - if empty or only contained invalid chars
+    if not sanitized or not re.match(r'^[a-z0-9]', sanitized):
+        sanitized = "default-index"
+    
+    # Limit to reasonable length (Pinecone may have a limit)
+    max_length = 45  # An assumed safe maximum
+    if len(sanitized) > max_length:
+        sanitized = sanitized[:max_length]
+        # Ensure we don't end with a hyphen
+        sanitized = sanitized.rstrip('-')
+    
+    return sanitized
+
 # Function to Submit RAG Query
 def submit_rag_query(question, model, quarters=None):
     try:
         with st.spinner("⏳ Processing your question with RAG pipeline... This may take a moment."):
-            request_id = f"rag_{uuid.uuid4()}"
-            
             # Prepare the request payload
             payload = {
-                "request_id": request_id,
-                "question": question,
-                "model": model,
-                "parser": st.session_state.pdf_parser,
+                # REQUIRED fields by FastAPI:
+                "query": question,
                 "rag_method": st.session_state.rag_method,
-                "chunking_strategy": st.session_state.chunking_strategy,
-                "quarters": quarters
+                "model_id": model,
+                
+                # OPTIONAL fields:
+                "data_source": st.session_state.data_source,
+                "quarters": quarters,
+                "similarity_metric": st.session_state.similarity_metric
             }
             
-            # Submit to API
+            # Special handling for manual_embedding
+            if st.session_state.rag_method == "manual_embedding":
+                payload["embedding_id"] = "direct_query"
+            
+            # Special handling for Pinecone
+            if st.session_state.rag_method == "Pinecone":
+                # Create a sanitized index name based on data source or file name
+                index_base = "pinecone"  # Start with a simple prefix
+                
+                # Add data source info if available
+                if st.session_state.data_source:
+                    index_base += "-" + st.session_state.data_source.replace(" ", "")
+                
+                # Add quarter info if available (limited to first quarter to avoid long names)
+                if quarters and len(quarters) > 0:
+                    index_base += "-" + quarters[0]
+                
+                # Sanitize the index name
+                index_name = sanitize_index_name(index_base)
+                
+                # Add debugging info visible in the UI
+                st.info(f"Using Pinecone index name: '{index_name}'")
+                
+                payload["index_name"] = index_name
+            
+            # Now post as JSON
             response = requests.post(
-                st.session_state.RAG_QUERY_API, 
+                st.session_state.RAG_QUERY_API,
                 json=payload
             )
-            
-            if response.status_code == 202:
-                # Got a job ID, need to poll for result
-                job_id = response.json().get("request_id")
-                result = poll_for_llm_result(job_id)
-                
-                if result and "error" not in result:
-                    return result
-                else:
-                    st.error(f"Error getting answer: {result.get('error', 'Unknown error')}")
-                    return None
+
+            if response.status_code == 200:
+                return response.json()
             else:
                 st.error(f"Failed to submit query: {response.text}")
                 return None
     except Exception as e:
         st.error(f"Error in query processing: {str(e)}")
         return None
+
 
 # Function to fetch available LLM models from API
 def fetch_available_models():
@@ -213,18 +270,18 @@ if "available_models" not in st.session_state:
 def process_rag_embeddings(file_id, markdown_path, rag_method, chunking_strategy):
     try:
         with st.spinner("⏳ Creating embeddings... This may take a moment."):
-            # Prepare the request payload
-            params = {
-                "file_id": file_id,
+            # Prepare the request payload as JSON body (not query params)
+            payload = {
                 "markdown_path": markdown_path,
                 "rag_method": rag_method,
-                "chunking_strategy": chunking_strategy
+                "chunking_strategy": chunking_strategy,
+                "embedding_model": "all-MiniLM-L6-v2"  # Add default embedding model
             }
             
-            # Submit to API
+            # Submit to API with JSON body instead of query params
             response = requests.post(
-                st.session_state.RAG_PROCESS_PDF_EMBEDDINGS_API, 
-                params=params
+                st.session_state.RAG_EMBEDDING_API, 
+                json=payload  # Changed from params to json
             )
             
             if response.status_code == 200:
@@ -367,6 +424,8 @@ if st.session_state.get("next_clicked", False):
                             st.session_state.embedding_job_id = embedding_result.get("job_id")
                         else:
                             st.error(f"Embedding failed: {embedding_result.get('error')}")
+                else:
+                    st.error("Error processing the uploaded file.")
     
     elif st.session_state.data_source == "Nvidia Dataset":
         st.header("Query Nvidia Quarterly Reports")
@@ -427,7 +486,7 @@ if st.session_state.get("next_clicked", False):
                     
                     # Show the answer with citations
                     st.markdown("### Answer")
-                    answer_text = result.get("answer", "No answer available")
+                    answer_text = result.get("answer") or result.get("response") or "No answer available"
                     st.markdown(answer_text)
                     
                     # Show source documents if available

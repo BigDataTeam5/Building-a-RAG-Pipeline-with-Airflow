@@ -16,7 +16,7 @@ project_root = os.path.dirname(current_dir)
 sys.path.insert(0, project_root)  # Add project root to path
 
 # Local imports
-from litellm_query_generator import generate_response
+from litellm_query_generator import generate_response, MODEL_CONFIGS
 from parsing_methods.doclingparsing import main as docling_parse
 from parsing_methods.mistralparsing import process_pdf as mistral_parse
 
@@ -87,10 +87,12 @@ class QueryRequest(BaseModel):
     embedding_id: Optional[str] = None  # For manual embeddings
     markdown_path: Optional[str] = None  # For stored markdown files
     rag_method: str  # "chromadb" or "pinecone"
+    data_source: Optional[str] = None  # "Nvidia Dataset" or "PDF Upload"
+    quarters: Optional[List[str]] = None  # List of quarters to filter by
     model_id: str = "gpt4o"
     similarity_metric: Optional[str] = "cosine"
     top_k: Optional[int] = 5
-
+    
 # Function to determine the quarter
 def get_quarter(date: str) -> str:
     dt = datetime.strptime(date, "%Y-%m-%d")
@@ -118,61 +120,49 @@ def get_year_quarter(date_request: DateRequest):
 @app.post("/upload-pdf")
 async def upload_pdf(
     file: UploadFile = File(...),
-    parser: str = Query("docling"),  
+    parser: str = Query("docling"),
     rag_method: Optional[str] = Query(None),
     chunking_strategy: Optional[str] = Query(None)
 ):
     try:
-        log_request(f"PDF Upload: {file.filename}, Parser: {parser}, RAG: {rag_method}, Chunking: {chunking_strategy}")
-        
-        # Create a unique filename
-        file_id = f"{uuid.uuid4()}"
-        file_extension = os.path.splitext(file.filename)[1]
-        file_path = os.path.join(UPLOAD_DIR, f"{file_id}{file_extension}")
-        
-        # Save the uploaded file
-        with open(file_path, "wb") as buffer:
-            contents = await file.read()
-            buffer.write(contents)
-        
-        pdf_logger.info(f"File saved to {file_path}")
-        
-        # Create markdown output directory
-        markdown_dir = "user_markdowns"
-        os.makedirs(markdown_dir, exist_ok=True)
-        markdown_filename = os.path.splitext(os.path.basename(file.filename))[0] + ".md"
-        markdown_path = os.path.join(markdown_dir, markdown_filename)
-        
-        # Use the appropriate parser based on user selection
+        file_id = str(uuid.uuid4())
+        filename = file.filename
+        file_path = os.path.join(UPLOAD_DIR, f"{file_id}_{filename}")
+
+        # Save the uploaded PDF
+        with open(file_path, "wb") as f:
+            f.write(await file.read())
+
+        # Generate the markdown path
+        markdown_filename = os.path.splitext(filename)[0] + ".md"
+        markdown_path = os.path.join(MARKDOWN_DIR, f"{file_id}_{markdown_filename}")
+
+        # Parse the PDF
+        parsed_content = ""
         if parser.lower() == "docling":
-            pdf_logger.info(f"Starting Docling conversion for {file.filename}")
-            # Call docling_parse with just the file path
-            docling_parse(file_path)
-            parser_name = "Docling"
-        elif parser.lower() == "mistral ocr" or parser.lower() == "mistral":
-            pdf_logger.info(f"Starting Mistral OCR conversion for {file.filename}")
-            # Call mistral_parse with just the file path
-            mistral_parse(file_path)
-            parser_name = "Mistral OCR"
-        else:
-            raise HTTPException(status_code=400, detail=f"Unsupported parser: {parser}")
-        
-        pdf_logger.info(f"{parser_name} conversion completed for {file.filename}")
-        
-        # Return success response with PDF and markdown info
+            parsed_content = docling_parse(file_path)
+        elif parser.lower() == "mistral":
+            parsed_content = mistral_parse(file_path)
+
+        # <-- CHANGED: Always write the Markdown file, even if empty
+        with open(markdown_path, "w", encoding="utf-8") as f:
+            f.write(parsed_content or "")
+
         return {
-            "filename": file.filename,
+            "filename": filename,
             "saved_as": file_path,
-            "file_id": file_id,  # Include file_id for reference in further processing
+            "file_id": file_id,
+            "markdown_path": markdown_path,  # Return this so the front-end can embed
             "parser": parser,
             "rag_method": rag_method,
             "chunking_strategy": chunking_strategy,
             "status": "success"
         }
+
     except Exception as e:
         log_error(f"Error uploading PDF", e)
         raise HTTPException(status_code=500, detail=str(e))
-
+    
 @app.get("/nvidia/quarters")
 async def get_nvidia_quarters():
     try:
@@ -194,20 +184,39 @@ async def get_nvidia_quarters():
 @app.get("/llm/models")
 async def get_available_models():
     # Return a list of supported LLM models
-    models = ["gpt-3.5-turbo", "gpt-4", "claude-3-opus", "mistral-7b"]
+    models = list(MODEL_CONFIGS.keys())
+    api_logger.info(f"Available LLM models: {', '.join(models)}")
     return {"models": models}
 
 @app.post("/rag/query")
 async def rag_query(request: QueryRequest):
     """Query the RAG system using the specified method and model"""
     try:
-        log_request(f"RAG Query: {request.query}, Method: {request.rag_method}, Model: {request.model_id}")
+        log_request(f"RAG Query: {request.query}, Method: {request.rag_method}, Model: {request.model_id},DataSource: {request.data_source}")
         
         result = None
         
         # Handle manual embeddings
-        if request.embedding_id and request.embedding_id in embedding_store:
-            embedding_data = embedding_store[request.embedding_id]
+        if request.rag_method.lower() == "manual_embedding":
+            # For manual embedding method, we'll use LiteLLM to generate a response
+            # without retrieval since there may not be specific content to reference
+            response = generate_response(
+                chunks=["This is a direct query without retrieval."],  # Placeholder
+                query=request.query,
+                model_id=request.model_id,
+                metadata=[{"source": "direct_query"}]
+            )
+            
+            result = {
+                "answer": response.get("answer", "Error generating response"),
+                "usage": response.get("usage", {}),
+                "source": "Manual embedding (direct query)",
+                "chunks_used": 1
+            }
+        
+        # Handle manual embeddings
+        elif request.embedding_id and request.embedding_id in embedding_store:
+            embedding_data = embedding_store[request.embedding_id] 
             chunks = embedding_data["chunks"]
             
             # Use LiteLLM to generate response directly
@@ -231,8 +240,10 @@ async def rag_query(request: QueryRequest):
                 query=request.query,
                 similarity_metric=request.similarity_metric,
                 llm_model=request.model_id,
-                top_k=request.top_k
-            )
+                top_k=request.top_k,
+                data_source=request.data_source,
+                quarters=request.quarters           
+            )   
         
         # Handle Pinecone
         elif request.rag_method.lower() == "pinecone":
