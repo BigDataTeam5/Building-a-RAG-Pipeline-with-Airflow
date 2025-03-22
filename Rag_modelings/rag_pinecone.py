@@ -83,11 +83,11 @@ def semantic_chunking(text, avg_size=300, min_size=50):
 
 def chunk_document(text, chunking_strategy):
     """Chunk document using the specified strategy."""
-    if chunking_strategy == "Character-Based Chunking":
+    if (chunking_strategy == "Character-Based Chunking"):
         return character_based_chunking(text)
-    elif chunking_strategy == "Recursive Character/Token Chunking":
+    elif (chunking_strategy == "Recursive Character/Token Chunking"):
         return recursive_chunking(text)
-    elif chunking_strategy == "Semantic Chuking(Kamradt Method)":
+    elif (chunking_strategy == "Semantic Chuking(Kamradt Method)"):
         return semantic_chunking(text)
     else:
         # Default to recursive chunking if strategy not recognized
@@ -158,8 +158,8 @@ def initialize_connections():
             logger.info(f"Creating new Pinecone index: {index_name}")
             pc.create_index(
                 name=index_name,
-                dimension=1536,
-                metric="cosine",  # Default metric, can be overridden at query time
+                dimension=1536,  # Changed to match text-embedding-ada-002 dimension
+                metric="cosine",
                 spec=ServerlessSpec(
                     cloud='aws',
                     region=pinecone_env
@@ -199,11 +199,11 @@ def truncate_text(text, max_bytes=1000):
         return text[:max_bytes // 2]  # Fallback truncation
 
 # Task 3: Generate embeddings
-def get_embedding(text, client, model="text-embedding-ada-002"):
+def get_embedding(text: str, client):
     """Generate embedding using OpenAI API"""
     try:
         response = client.embeddings.create(
-            model=model,
+            model="text-embedding-ada-002",
             input=[text]
         )
         return response.data[0].embedding
@@ -223,25 +223,26 @@ def prepare_vectors_for_upload(chunks, client):
         logger.info(f"Preparing {len(chunks)} chunks for vectorization")
         vectors = []
         for i, chunk in enumerate(chunks):
-            if i % 10 == 0:
-                logger.info(f"Processing chunk {i}/{len(chunks)}")
-                
-            text = chunk.get("text", "")
-            filename = chunk.get("file_path", "")
-            chunk_id = str(chunk.get("id", str(uuid4())))
+            if isinstance(chunk, str):
+                text = chunk
+                chunk_id = str(i)
+            else:
+                text = chunk.get("text", "")
+                chunk_id = str(chunk.get("id", i))
             
             try:
                 vector = get_embedding(text, client)
-                truncated_text = truncate_text(text)
+                # Store full text in metadata
                 vectors.append({
                     "id": chunk_id,
                     "values": vector,
                     "metadata": {
-                        "text_preview": truncated_text,
-                        "file_name": filename,
+                        "text_preview": text,  # Store full text
+                        "file_name": f"chunk_{chunk_id}",
                         "original_length": len(text)
                     }
                 })
+                logger.info(f"Processed chunk {chunk_id} with length {len(text)}")
             except Exception as e:
                 logger.error(f"Error processing chunk {chunk_id}: {str(e)}")
                 continue
@@ -277,49 +278,68 @@ def upload_vectors_to_pinecone(vectors, index, batch_size=100):
         raise
 
 # Task 6: Search Pinecone for relevant chunks
-def get_query_embedding(query_text, client, model="text-embedding-ada-002"):
+def get_query_embedding(query_text, client):
     """Generate embedding for the query text"""
     try:
+        logger.info(f"Generating embedding for query: {query_text[:100]}...")
         response = client.embeddings.create(
-            model=model,
+            model="text-embedding-ada-002",
             input=[query_text]
         )
-        return response.data[0].embedding
+        embedding = response.data[0].embedding
+        logger.info(f"Generated embedding with dimension: {len(embedding)}")
+        return embedding
     except Exception as e:
         logger.error(f"Error generating query embedding: {str(e)}")
         raise
 
-def search_pinecone(query, client, index, similarity_metric="cosine", top_k=5):
+def search_pinecone(query, client, index, top_k=5):
     """Search Pinecone index for relevant chunks using specified similarity metric"""
     try:
-        logger.info(f"Searching for: '{query}' with top_k={top_k} and similarity_metric={similarity_metric}")
+        logger.info(f"Searching for: '{query}' with top_k={top_k}")
+        
+        # Generate query embedding
         query_embedding = get_query_embedding(query, client)
         
-        # Apply similarity metric at query time
+        # Debug log the query vector
+        logger.info(f"Query embedding dimension: {len(query_embedding)}")
+        
+        # Search Pinecone with namespace
         results = index.query(
             vector=query_embedding,
             top_k=top_k,
             include_metadata=True,
-            include_values=False,
-            metric=similarity_metric  # Apply similarity metric at query time
+            include_values=True
         )
         
-        logger.info(f"Found {len(results['matches'])} matches")
+        # Debug logging for results
+        logger.info(f"Raw results matches count: {len(results.matches)}")
         
-        # Debug the first match metadata if available
-        if results['matches'] and len(results['matches']) > 0:
-            logger.info(f"First match metadata: {results['matches'][0].get('metadata', {})}")
+        # Enhanced logging for debugging
+        for match in results.matches:
+            logger.info(f"Match ID: {match.id}")
+            logger.info(f"Match Score: {match.score}")
+            logger.info(f"Match Metadata: {match.metadata}")
         
-        # Add similarity metric used to each match's metadata
-        for match in results['matches']:
-            if 'metadata' in match:
-                match['metadata']['similarity_metric_used'] = similarity_metric
-                
-                # Ensure file_name has a value if empty
-                if not match['metadata'].get('file_name'):
-                    match['metadata']['file_name'] = "Unknown document"
+        # Convert Pinecone response to dictionary format
+        formatted_results = {
+            'matches': [
+                {
+                    'id': match.id,
+                    'score': float(match.score),
+                    'metadata': match.metadata,
+                    'text': match.metadata.get('text_preview', '')
+                } for match in results.matches
+            ]
+        }
         
-        return results
+        if not formatted_results['matches']:
+            logger.warning("No matches found in search results")
+        else:
+            logger.info(f"Found {len(formatted_results['matches'])} matches")
+        
+        return formatted_results
+        
     except Exception as e:
         logger.error(f"Error searching Pinecone: {str(e)}")
         raise
@@ -337,14 +357,14 @@ def count_tokens(text, model="gpt-3.5-turbo"):
 
 
 # Task: Enhanced response generation using LiteLLM
-def enhanced_generate_response(query, context_chunks, client, model_id="gpt4o", metadata=None):
-    """Generate response using retrieved chunks with LiteLLM
+def enhanced_generate_response(query, context_chunks, client, model_id="gpt-3.5-turbo", metadata=None):
+    """Generate response using OpenAI with context chunks
     
     Args:
         query (str): User query
         context_chunks (list): Retrieved context chunks
-        client: OpenAI client (not used with LiteLLM)
-        model_id (str): Model ID for LiteLLM (from MODEL_CONFIGS)
+        client: OpenAI client
+        model_id (str): Model ID for OpenAI
         metadata (list): Optional metadata for chunks
         
     Returns:
@@ -353,28 +373,44 @@ def enhanced_generate_response(query, context_chunks, client, model_id="gpt4o", 
     try:
         logger.info(f"Generating response for query with {len(context_chunks)} context chunks")
         
-        # For LiteLLM, we need the text of chunks
+        # Extract text from chunks
         if isinstance(context_chunks[0], dict):
-            chunks = [chunk['metadata']['text_preview'] for chunk in context_chunks]
+            context = "\n".join([chunk['metadata']['text_preview'] for chunk in context_chunks])
         else:
-            chunks = context_chunks
+            context = "\n".join(context_chunks)
             
-        # Use LiteLLM response generator
-        llm_response = generate_response(
-            chunks=chunks,
-            query=query,
-            model_id=model_id,
-            metadata=metadata
+        # Create messages for chat completion
+        messages = [
+            {
+                "role": "system",
+                "content": "You are a helpful assistant. Answer the question based on the provided context."
+            },
+            {
+                "role": "user",
+                "content": f"Context: {context}\n\nQuestion: {query}\n\nAnswer the question based on the context provided."
+            }
+        ]
+        
+        # Get response from OpenAI
+        response = client.chat.completions.create(
+            model=model_id,
+            messages=messages,
+            temperature=0.7,
+            max_tokens=500
         )
         
-        # Format the response to match the expected structure
+        # Format the response
         return {
-            "content": llm_response.get("answer", "Error generating response"),
-            "usage": llm_response.get("usage", {})
+            "content": response.choices[0].message.content,
+            "usage": {
+                "prompt_tokens": response.usage.prompt_tokens,
+                "completion_tokens": response.usage.completion_tokens,
+                "total_tokens": response.usage.total_tokens
+            }
         }
     except Exception as e:
         logger.error(f"Error generating response: {str(e)}")
-        raise
+        return {"error": str(e)}
 
 # Task 8: Enhanced Interactive Q&A function
 def enhanced_interactive_qa(client, index, query, model_id="gpt4o", similarity_metric="cosine", top_k=5):
@@ -383,40 +419,34 @@ def enhanced_interactive_qa(client, index, query, model_id="gpt4o", similarity_m
     
     try:
         # Search for relevant chunks with specified similarity metric
-        results = search_pinecone(query, client, index, top_k=top_k, similarity_metric=similarity_metric)
+        results = search_pinecone(query, client, index, top_k=5)
         
         if not results['matches']:
             return {"answer": "No relevant information found.", "usage": {}}
         
-        # Debug the embeddings
+        # Debug the matches
         logger.info(f"Retrieved {len(results['matches'])} matches for query")
+        for match in results['matches']:
+            logger.info(f"Match score: {match['score']}, Preview: {match['metadata'].get('text_preview', '')[:100]}")
         
-        # Enhanced formatting of sources for better debugging
+        # Enhanced formatting of sources
         sources_for_response = []
-        for i, match in enumerate(results['matches'], 1):
-            # Get metadata with fallbacks for missing fields
-            metadata = match.get('metadata', {})
-            file_name = metadata.get('file_name', 'Unknown')
-            text_preview = metadata.get('text_preview', 'No preview available')
-            score = match.get('score', 0.0)
-            
-            logger.info(f"Match {i} (score: {score:.4f}): {file_name}")
-            logger.info(f"  Preview: {text_preview[:100]}...")
-            
+        for match in results['matches']:
+            metadata = match['metadata']
             sources_for_response.append({
-                "score": score,
-                "file": file_name,
-                "preview": text_preview[:150] if text_preview else "No preview",
+                "score": match['score'],
+                "file": metadata.get('file_name', 'Unknown'),
+                "preview": metadata.get('text_preview', '')[:150],
                 "similarity_metric": metadata.get('similarity_metric_used', similarity_metric)
             })
         
-        # Generate response using chunks with the enhanced function
+        # Generate response using chunks
         response_data = enhanced_generate_response(
             query, 
             results['matches'], 
             client,
             model_id=model_id,
-            metadata=[match.get('metadata', {}) for match in results['matches']]
+            metadata=[match['metadata'] for match in results['matches']]
         )
         
         return {
@@ -431,67 +461,52 @@ def enhanced_interactive_qa(client, index, query, model_id="gpt4o", similarity_m
         raise
 
 def load_data_to_pinecone(json_file_path, chunking_strategy=None):
-    """Load data from JSON and upload to Pinecone vector database
-    
-    Args:
-        json_file_path (str): Path to the JSON file containing chunks
-        chunking_strategy (str, optional): Chunking strategy to apply
-        
-    Returns:
-        dict: Status information about the upload process
-    """
+    """Load data from JSON and upload to Pinecone vector database"""
     try:
         # Initialize connections
         client, pc, index, index_name = initialize_connections()
         
-        if not json_file_path:
-            logger.warning("No JSON file path provided")
-            return {"error": "No JSON file path provided"}
-        
-        # Delete existing index if it exists
-        try:
-            if index_name in pc.list_indexes().names():
-                logger.info(f"Deleting existing index: {index_name}")
-                pc.delete_index(index_name)
-                
-                # Recreate the index
-                logger.info(f"Recreating index: {index_name}")
-                pc.create_index(
-                    name=index_name,
-                    dimension=1536,
-                    metric="cosine",
-                    spec=ServerlessSpec(
-                        cloud='aws',
-                        region=os.getenv("PINECONE_ENV", "us-east-1")
-                    )
-                )
-                # Get the new index
-                index = pc.Index(index_name)
-                logger.info(f"Successfully recreated index: {index_name}")
-        except Exception as e:
-            logger.error(f"Error while deleting/recreating index: {str(e)}")
-            return {"error": f"Failed to recreate index: {str(e)}"}
-            
-        # Load chunks and upload to vector database
+        # Load chunks
+        logger.info(f"Loading chunks from {json_file_path}")
         chunks = load_chunks_from_json(json_file_path)
         
-        # Apply conditional chunking if strategy is specified
-        if chunking_strategy:
-            logger.info(f"Applying {chunking_strategy} chunking strategy")
-            full_text = "\n\n".join([chunk.get("text", "") for chunk in chunks])
-            chunks = process_document_with_chunking(full_text, chunking_strategy)
-            chunks = [{"text": chunk, "file_path": json_file_path, "id": str(uuid4())} for chunk in chunks]
+        # Prepare vectors with enhanced metadata
+        vectors = []
+        for i, chunk in enumerate(chunks):
+            text = chunk.get("text", "")
+            vector = get_embedding(text, client)
+            
+            vectors.append({
+                "id": str(chunk.get("id", i)),
+                "values": vector,
+                "metadata": {
+                    "text_preview": text,
+                    "file_name": chunk.get("file_path", f"chunk_{i}"),
+                    "original_length": len(text),
+                    "chunk_index": i
+                }
+            })
+            logger.info(f"Prepared vector {i} with text length {len(text)}")
         
-        # Prepare and upload vectors
-        vectors = prepare_vectors_for_upload(chunks, client)
-        total_uploaded = upload_vectors_to_pinecone(vectors, index)
+        # Upload vectors in batches
+        batch_size = 100
+        total_uploaded = 0
+        
+        for i in range(0, len(vectors), batch_size):
+            batch = vectors[i:min(i + batch_size, len(vectors))]
+            index.upsert(vectors=batch)
+            total_uploaded += len(batch)
+            logger.info(f"Uploaded batch of {len(batch)} vectors. Total: {total_uploaded}")
+        
+        # Verify upload
+        stats = index.describe_index_stats()
+        logger.info(f"Index stats after upload: {stats}")
         
         return {
             "status": "success",
             "total_chunks": len(chunks),
             "total_vectors_uploaded": total_uploaded,
-            "index_name": index_name,
-            "index_recreated": True
+            "index_name": index_name
         }
         
     except Exception as e:
@@ -525,59 +540,188 @@ def query_pinecone_rag(query, model_id="gpt4o", similarity_metric="cosine"):
         return {"error": str(e)}
 
 # Main execution function with enhanced options
-def run_rag_pipeline(query="What is Nvidia?", model_id="gpt4o", similarity_metric="cosine", top_k=5):
-    """Query existing Pinecone index and generate RAG response with clearer parameters"""
+def run_rag_pipeline(query="What is Nvidia?", model_id="gpt-3.5-turbo", similarity_metric="cosine", top_k=5):
+    """Query existing Pinecone index and generate RAG response with enhanced formatting"""
     try:
         # Validate parameters
         if not isinstance(query, str) or not query.strip():
-            logger.error("Invalid query parameter - must be a non-empty string")
+            logger.error("Invalid query parameter")
             return {"error": "Invalid query - must be a non-empty string"}
             
         logger.info(f"Running RAG pipeline with query: '{query}', model: {model_id}")
         
-        # Use the existing query_pinecone_rag function to search and generate response
-        query_result = query_pinecone_rag(query, model_id, similarity_metric)
-        if "error" in query_result:
-            return query_result
+        # Initialize connections
+        client, _, index, _ = initialize_connections()
         
-        # Display the results
+        # Search for relevant chunks with correct parameter order
+        search_results = search_pinecone(query, client, index, top_k)
+        
+        if not search_results['matches']:
+            logger.warning("No matches found in vector store")
+            print("\n" + "="*50)
+            print("❌ NO RESULTS FOUND")
+            print("="*50 + "\n")
+            return {"answer": "No relevant information found in the knowledge base."}
+        
+        # Generate response using chunks
+        response_data = enhanced_generate_response(
+            query=query,
+            context_chunks=search_results['matches'],
+            client=client,
+            model_id=model_id
+        )
+        
+        if "error" in response_data:
+            logger.error(f"Error in response generation: {response_data['error']}")
+            return {"error": response_data["error"]}
+        
+        # Format and display the results
         print("\n" + "="*50)
         print("🔍 SEARCH QUERY:", query)
         print("="*50)
         print("📝 ANSWER:")
-        print(query_result.get("answer", "No answer generated"))
+        print(response_data["content"])
         print("\n💡 SOURCES:")
-        for i, source in enumerate(query_result.get("sources", []), 1):
-            print(f"  {i}. Score: {source['score']:.4f}")
-            print(f"     File: {source['file']}")
-            print(f"     Preview: {source['preview']}...")
+        for i, match in enumerate(search_results['matches'], 1):
+            print(f"  {i}. Score: {match['score']:.4f}")
+            print(f"     File: {match['metadata'].get('file_name', 'Unknown')}")
+            preview = match['metadata'].get('text_preview', '')[:150]
+            print(f"     Preview: {preview}...")
             print()
+        print("📊 USAGE STATS:")
+        print(f"    Tokens: {response_data['usage'].get('total_tokens', 0)}")
         print("="*50 + "\n")
         
-        return query_result
+        # Return structured response
+        return {
+            "answer": response_data["content"],
+            "sources": search_results['matches'],
+            "usage": response_data["usage"],
+            "similarity_metric": similarity_metric
+        }
         
     except Exception as e:
         logger.error(f"Error in RAG pipeline: {str(e)}")
         return {"error": str(e)}
-    # Entry point
-if __name__ == "__main__":
-   # Test text
-    test_text = """
-    This is a test document.
-    It has multiple paragraphs.
 
-    This is another paragraph.
+# Add this new function after the chunking strategies
+def save_chunks_to_json(chunks, strategy_name):
+    """Save chunks to a JSON file"""
+    try:
+        # Create output directory if it doesn't exist
+        output_dir = os.path.join("output", strategy_name.lower().replace(" ", "_"))
+        os.makedirs(output_dir, exist_ok=True)
+        
+        # Prepare chunks with IDs and metadata
+        chunk_data = []
+        for i, chunk in enumerate(chunks):
+            chunk_data.append({
+                "id": i,
+                "text": chunk,
+                "char_length": len(chunk),
+                "file_path": f"{strategy_name}_chunk_{i}"
+            })
+        
+        output_data = {
+            "strategy": strategy_name,
+            "chunk_count": len(chunks),
+            "chunks": chunk_data
+        }
+        
+        # Save to JSON file
+        output_file = os.path.join(output_dir, "chunks.json")
+        with open(output_file, 'w', encoding='utf-8') as f:
+            json.dump(output_data, f, indent=2)
+            
+        logger.info(f"Saved {len(chunks)} chunks to {output_file}")
+        return output_file
+        
+    except Exception as e:
+        logger.error(f"Error saving chunks to JSON: {str(e)}")
+        raise
+
+def serialize_index_stats(stats):
+    """Convert Pinecone index stats to JSON serializable format"""
+    return {
+        'dimension': stats.dimension,
+        'index_fullness': stats.index_fullness,
+        'metric': stats.metric,
+        'namespaces': {
+            ns_name: serialize_namespace_summary(ns_summary)
+            for ns_name, ns_summary in stats.namespaces.items()
+        },
+        'total_vector_count': stats.total_vector_count
+    }
+
+def serialize_namespace_summary(namespace_summary):
+    """Convert Pinecone namespace summary to JSON serializable format"""
+    return {
+        'vector_count': namespace_summary.vector_count
+    }
+
+# Update the main execution section
+if __name__ == "__main__":
+    # Configure logging
+    logging.basicConfig(level=logging.INFO)
+    
+    test_text = """
+    NVIDIA Corporation is a technology company with a market value of 100 billion dollars.
+    The company specializes in graphics processing units (GPUs) for gaming and professional markets,
+    as well as system on chip units (SoCs) for the mobile computing and automotive market.
     """
 
-    # Test each chunking strategy
-    strategies = [
-        "Character-Based Chunking",
-        "Recursive Character/Token Chunking", 
-        "Semantic Chuking(Kamradt Method)"
-    ]
-
-    for strategy in strategies:
-        chunks = process_document_with_chunking(test_text, strategy)
-        print(f"\nStrategy: {strategy}")
-        print(f"Number of chunks: {len(chunks)}")
-        print("First chunk preview:", chunks[0][:100] if chunks else "No chunks created")
+    try:
+        # Initialize connections first
+        client, pc, index, index_name = initialize_connections()
+        
+        # Process document
+        logger.info("Processing test document...")
+        chunks = process_document_with_chunking(test_text, "Recursive Character/Token Chunking")
+        logger.info(f"Created {len(chunks)} chunks")
+        
+        # Save chunks to JSON
+        json_file_path = save_chunks_to_json(chunks, "test_chunks")
+        logger.info(f"Saved chunks to {json_file_path}")
+        
+        # Upload to Pinecone and wait for indexing
+        upload_result = load_data_to_pinecone(json_file_path)
+        print("Upload result:", json.dumps(upload_result, indent=2))
+        
+        # Verify index status
+        stats = index.describe_index_stats()
+        try:
+            serialized_stats = serialize_index_stats(stats)
+            print("Index stats:", json.dumps(serialized_stats, indent=2))
+        except Exception as e:
+            print("Raw index stats:", {
+                'dimension': stats.dimension,
+                'total_vector_count': stats.total_vector_count,
+                'metric': stats.metric
+            })
+        
+        # Test queries
+        test_queries = [
+            "What is NVIDIA's market value?",
+            "What does NVIDIA specialize in?",
+        ]
+        
+        import time
+        time.sleep(2)  # Add a small delay to ensure indexing is complete
+        
+        for query in test_queries:
+            print(f"\nTesting query: {query}")
+            
+            # Direct search test with default namespace
+            search_results = search_pinecone(query, client, index, top_k=3)
+            print(f"Search results: {json.dumps(search_results, indent=2)}")
+            
+            # Full pipeline test
+            response = run_rag_pipeline(
+                query=query,
+                model_id="gpt-3.5-turbo",
+                top_k=3
+            )
+            print("Response:", json.dumps(response, indent=2))
+            
+    except Exception as e:
+        print(f"Error in test process: {str(e)}")
