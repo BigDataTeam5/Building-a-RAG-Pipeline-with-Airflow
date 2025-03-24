@@ -128,3 +128,68 @@ def process_pdf(pdf_url, output_dir=None):
         
         print(f"Error markdown saved to {output_path}")
         return str(output_path)
+
+def test_pdf_processing(pdf_url=None):
+    """
+    Test function to verify PDF processing with either a web URL or local file
+    
+    Args:
+        pdf_url (str, optional): URL of the PDF to process. If None, uses default test URL
+        
+    Returns:
+        tuple: (bool, str) - (success status, message/error)
+    """
+    try:
+        # Use provided URL or default to a test PDF
+        if not pdf_url:
+            pdf_url = "https://resources.research.gov/common/attachment/Desktop/How_do_I_create_a_PDF-A_file.pdf"
+
+        # Create test output directory
+        test_output_dir = Path("test_files/output")
+        test_output_dir.mkdir(exist_ok=True, parents=True)
+
+        # Verify URL format and accessibility
+        try:
+            response = requests.head(pdf_url, timeout=5)
+            if response.status_code != 200:
+                return False, f"URL not accessible: {pdf_url} (Status: {response.status_code})"
+        except requests.exceptions.RequestException as e:
+            return False, f"Error accessing URL: {str(e)}"
+
+        # Process the PDF
+        print(f"Testing PDF processing with URL: {pdf_url}")
+        start_time = time.time()
+        
+        output_path = process_pdf(pdf_url, test_output_dir)
+        
+        # Verify the output
+        output_file = Path(output_path)
+        if not output_file.exists():
+            return False, f"Output markdown file not generated at {output_path}"
+            
+        # Check if the markdown file has content
+        with open(output_file, 'r', encoding='utf-8') as f:
+            content = f.read()
+            if not content:
+                return False, "Generated markdown file is empty"
+        
+        processing_time = time.time() - start_time
+        return True, f"Successfully generated markdown in {processing_time:.2f} seconds at {output_path}"
+        
+    except Exception as e:
+        return False, f"Test failed with error: {str(e)}"
+
+if __name__ == "__main__":
+    # Example usage with different URLs
+    test_urls = [
+        "https://resources.research.gov/common/attachment/Desktop/How_do_I_create_a_PDF-A_file.pdf",
+        # Add more test URLs here
+    ]
+    
+    for url in test_urls:
+        print(f"\nTesting URL: {url}")
+        success, message = test_pdf_processing(url)
+        if success:
+            print(f"✅ Test passed: {message}")
+        else:
+            print(f"❌ Test failed: {message}")

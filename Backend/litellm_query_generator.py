@@ -64,9 +64,9 @@ print(f"- Grok:      {'✓' if litellm.xai_api_key else '✗'}")
 
 # Model configurations
 MODEL_CONFIGS = {
-    "gpt4o": {
-        "name": "GPT-4o",
-        "model": "openai/gpt-4o",
+    "gpt-3.5-turbo": {
+        "name": "gpt-3.5-turbo",
+        "model": "openai/gpt-3.5-turbo",
         "max_input_tokens": 128000,
         "max_output_tokens": 4096,
     },

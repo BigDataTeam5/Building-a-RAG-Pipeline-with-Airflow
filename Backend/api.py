@@ -75,7 +75,7 @@ class EmbeddingRequest(BaseModel):
     markdown_filename: str
     rag_method: str  # "chromadb" or "pinecone"
     chunking_strategy: Optional[str] = "Semantic Chuking(Kamradt Method)"
-    embedding_model: Optional[str] = "all-MiniLM-L6-v2"
+    embedding_model: Optional[str] = "text-embedding-ada-002"
 
 class ManualEmbeddingRequest(BaseModel):
     text: str
@@ -91,7 +91,7 @@ class QueryRequest(BaseModel):
     rag_method: str  # "chromadb" or "pinecone"
     data_source: Optional[str] = None  # "Nvidia Dataset" or "PDF Upload"
     quarters: Optional[List[str]] = None  # List of quarters to filter by
-    model_id: str = "gpt4o"
+    model_id: str = "gpt-3.5-turbo"  # Changed from "gpt4o" to "gpt-3.5-turbo"
     similarity_metric: Optional[str] = "cosine"
     top_k: Optional[int] = 5
     filter_criteria: Optional[dict] =None
