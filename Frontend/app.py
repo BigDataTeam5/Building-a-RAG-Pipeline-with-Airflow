@@ -11,7 +11,8 @@ import re
 # Streamlit UI
 st.set_page_config(page_title="Nvidia Quarterly data RAG", layout="wide")
 
-# Initialize session state variables if they do not exist
+if "show_token_usage" not in st.session_state:
+    st.session_state.show_token_usage = False
 if "file_uploaded" not in st.session_state:
     st.session_state.file_uploaded = False
 # Initialize session state for LLM responses
@@ -262,6 +263,31 @@ def poll_for_llm_result(job_id, max_retries=15, interval=2):
     progress_bar.empty()
     st.error(f"Timed out waiting for LLM response after {max_retries * interval} seconds.")
     return None
+# Add this toke usage calculation function
+def calculate_token_cost(model_id, usage_data):
+    """Calculate cost based on model and token usage"""
+    # Default rates (can be adjusted based on actual pricing)
+    rates = {
+        "gpt-4": {"input": 0.00003, "output": 0.00006},
+        "gpt-3.5-turbo": {"input": 0.0000015, "output": 0.000002},
+        "claude-3": {"input": 0.000025, "output": 0.000075},
+        "gemini-pro": {"input": 0.000001, "output": 0.000002},
+        "default": {"input": 0.000002, "output": 0.000004}
+    }
+    
+    # Get rates for the model or use default
+    model_rates = rates.get(model_id.lower(), rates["default"])
+    
+    # Calculate costs
+    input_cost = (usage_data.get("prompt_tokens", 0) * model_rates["input"])
+    output_cost = (usage_data.get("completion_tokens", 0) * model_rates["output"])
+    total_cost = input_cost + output_cost
+    
+    return {
+        "input_cost": input_cost,
+        "output_cost": output_cost,
+        "total_cost": total_cost
+    }
 
 # Fetch models at startup
 if "available_models" not in st.session_state:
@@ -275,7 +301,7 @@ def process_rag_embeddings(file_id, markdown_path, rag_method, chunking_strategy
                 "markdown_path": markdown_path,
                 "rag_method": rag_method,
                 "chunking_strategy": chunking_strategy,
-                "embedding_model": "all-MiniLM-L6-v2"  # Add default embedding model
+                "embedding_model": "text-embedding-ada-002"
             }
             
             # Submit to API with JSON body instead of query params
@@ -293,6 +319,67 @@ def process_rag_embeddings(file_id, markdown_path, rag_method, chunking_strategy
         st.error(f"Error in embedding creation: {str(e)}")
         return {"error": str(e)}
 
+# Add this new function after the process_rag_embeddings function
+def poll_for_embedding_status(job_id, max_retries=30, interval=2):
+    """Poll for embedding job status with progress bar and timeout handling"""
+    retries = 0
+    
+    # Create a progress bar
+    progress_text = "Creating embeddings and storing vectors in database..."
+    progress_bar = st.progress(0)
+    status_text = st.empty()
+    
+    while retries < max_retries:
+        try:
+            # Calculate progress percentage (cap at 95% until complete)
+            progress = min(retries / max_retries, 0.95)
+            progress_bar.progress(progress)
+            
+            # Update status message
+            if retries < max_retries * 0.3:
+                status_text.text("⏳ Processing document chunks...")
+            elif retries < max_retries * 0.6:
+                status_text.text("⏳ Creating vector embeddings...")
+            else:
+                status_text.text("⏳ Storing vectors in database...")
+            
+            # Check job status
+            response = requests.get(
+                f"{st.session_state.RAG_EMBEDDING_API}/status/{job_id}",
+                timeout=10
+            )
+            
+            if response.status_code == 200:
+                result_data = response.json()
+                status = result_data.get("status")
+                
+                if status == "completed":
+                    progress_bar.progress(1.0)  # Complete the progress bar
+                    status_text.text("✅ Embeddings created successfully!")
+                    time.sleep(0.5)  # Brief pause to show completed progress
+                    return result_data
+                    
+                elif status == "failed":
+                    progress_bar.empty()
+                    status_text.empty()
+                    st.error(f"Embedding creation failed: {result_data.get('error', 'Unknown error')}")
+                    return None
+            
+            retries += 1
+            time.sleep(interval)
+            
+        except Exception as e:
+            progress_bar.empty()
+            status_text.empty()
+            st.error(f"Error while polling for embedding status: {str(e)}")
+            return None
+    
+    # If we get here, we've exceeded max retries
+    progress_bar.empty()
+    status_text.empty()
+    st.error(f"Timed out waiting for embeddings after {max_retries * interval} seconds.")
+    return None
+
 # Sidebar UI
 with st.sidebar:
     st.title("RAG Pipeline Configuration")
@@ -309,7 +396,7 @@ with st.sidebar:
         # PDF parser selection
         pdf_parser = st.selectbox(
             "Select PDF Parser:",
-            ["Select a parser", "Docling", "Mistral OCR"],
+            ["Select a parser", "Docling", "Mistral"],
             index=0
         )
         
@@ -342,7 +429,7 @@ with st.sidebar:
         # Set default values for Nvidia Dataset
         st.session_state.pdf_parser = "Mistral"  
         st.session_state.rag_method = "ChromaDB"  
-        st.session_state.chunking_strategy = "semantic_chunking"  # Default chunking
+        st.session_state.chunking_strategy = "semantic_chunking"  
         st.session_state.llm_model = st.session_state.available_models[0] if st.session_state.available_models else "gpt-4"  # Default model
         
         # Display info about default configuration
@@ -387,6 +474,12 @@ with st.sidebar:
             st.success("Configuration applied successfully")
             st.session_state.next_clicked = True
             st.rerun()
+    st.markdown("---")
+    st.subheader("Analytics")
+    if st.button("📊 View Token Usage"):
+        st.session_state.show_token_usage = True
+        st.rerun()
+    
 
 # Main Page Logic
 st.title("📄 RAG Pipeline with Airflow")
@@ -409,24 +502,35 @@ if st.session_state.get("next_clicked", False):
                     file_id = upload_response["file_id"]
                     markdown_path = upload_response["markdown_path"]
                     
-                    if st.button("Process Chunking & Create Embeddings"):
-                        embedding_result = process_rag_embeddings(
-                            file_id, 
-                            markdown_path,
-                            st.session_state.rag_method,
-                            st.session_state.chunking_strategy
-                        )
-                        if "error" not in embedding_result:
-                            st.success("✅ Embeddings created successfully!")
-                            st.info("You can now ask questions about your document.")
+                # Replace the existing embedding button code (around line 462)
+                if st.button("Process Chunking & Create Embeddings"):
+                    # Start the embedding process
+                    embedding_response = process_rag_embeddings(
+                        file_id, 
+                        markdown_path,
+                        st.session_state.rag_method,
+                        st.session_state.chunking_strategy
+                    )
+                    
+                    if "error" not in embedding_response:
+                        # Get the job ID from the response
+                        job_id = embedding_response.get("job_id")
+                        if job_id:
+                            # Poll for job completion
+                            final_result = poll_for_embedding_status(job_id, max_retries=60)
                             
-                            # Store the job_id for later reference
-                            st.session_state.embedding_job_id = embedding_result.get("job_id")
+                            if final_result and final_result.get("status") == "completed":
+                                st.success("✅ Embeddings created successfully!")
+                                st.info("You can now ask questions about your document.")
+                                
+                                # Store the job_id for later reference
+                                st.session_state.embedding_job_id = job_id
+                            else:
+                                st.error("Failed to create embeddings. Please try again.")
                         else:
-                            st.error(f"Embedding failed: {embedding_result.get('error')}")
-                else:
-                    st.error("Error processing the uploaded file.")
-    
+                            st.error("No job ID returned from the embedding creation process.")
+                    else:
+                        st.error(f"Embedding failed: {embedding_response.get('error')}")    
     elif st.session_state.data_source == "Nvidia Dataset":
         st.header("Query Nvidia Quarterly Reports")
         
@@ -497,6 +601,127 @@ if st.session_state.get("next_clicked", False):
                                 st.markdown(f"**Document:** {source.get('document', 'Unknown')}")
                                 st.markdown(f"**Text:** {source.get('text', 'No text available')}")
                                 st.markdown("---")
+
+# Token usage display
+if st.session_state.show_token_usage:
+    st.title("📊 Token Usage Analytics")
+    if st.button("🔙 Go Back"):
+        st.session_state.show_token_usage = False
+        st.rerun()
+    st.markdown("### Token Usage History")
+    if "token_usage_records" not in st.session_state:
+        st.session_state.token_usage_records = []
+    if hasattr(st.session_state, "question_result") and st.session_state.question_result:
+        usage_data = st.session_state.question_result.get("usage", {})
+        if usage_data:
+            st.session_state.token_usage_records.append(usage_data)
+        # extract usage data if available 
+        if "usage" in result:
+            if isinstance(usage_data, str):
+                try:
+                    usage_data = json.loads(usage_data)
+                except:
+                    usage_data = {"prompt_tokens": 0, "completion_tokens": 0,"total_tokens": 0}
+            # Calculate costs based on the model
+            model_id = result.get("model_id", "gpt-4")
+            cost_data = calculate_token_cost(model_id, usage_data)
+
+            #Create  a timestamp if not present
+            if "timestamp" not in result:
+                result["timestamp"] = time.strftime("%Y-%m-%d %H:%M:%S")
+            #Add to usage records if not already there 
+            query_id = result.get("job_id", str(uuid.uuid4()))
+
+            # Check if this exact query is already recorded
+            if not any(record.get("job_id")  == query_id for record in st.session_state.token_usage_records):
+                st.session_state.token_usage_records.append({
+                    "job_id": query_id,
+                    "task_type": "RAG Query",
+                    "query": result.get("query", "")[:30] + "..." if len(result.get("query", "")) > 30 else result.get("query", ""),
+                    "model": model_id,
+                    "prompt_tokens": usage_data.get("prompt_tokens", 0),
+                    "completion_tokens": usage_data.get("completion_tokens", 0),
+                    "total_tokens": usage_data.get("total_tokens", 0),
+                    "cost": cost_data["total_cost"],
+                    "timestamp": result["timestamp"]
+                })
+# Display usage statistics
+    if not st.session_state.token_usage_records:
+        st.info("No token usage data available yet. Ask questions to see usage statistics.")
+    else:
+        # Calculate total tokens and cost
+        total_tokens = sum(record["total_tokens"] for record in st.session_state.token_usage_records)
+        total_cost = sum(record["cost"] for record in st.session_state.token_usage_records)
+        prompt_tokens = sum(record["prompt_tokens"] for record in st.session_state.token_usage_records)
+        completion_tokens = sum(record["completion_tokens"] for record in st.session_state.token_usage_records)
+        
+        # Display overall metrics
+        st.subheader("Overall Usage")
+        col1, col2, col3, col4 = st.columns(4)
+        col1.metric("Total Tokens", f"{total_tokens:,}")
+        col2.metric("Input Tokens", f"{prompt_tokens:,}")
+        col3.metric("Output Tokens", f"{completion_tokens:,}")
+        col4.metric("Total Cost", f"${total_cost:.5f}")
+        
+        # Display detailed usage table
+        st.subheader("Detailed Usage History")
+        
+        # Convert to DataFrame for display
+        import pandas as pd
+        df = pd.DataFrame(st.session_state.token_usage_records)
+        
+        # Reorder columns for better display
+        column_order = ["timestamp", "task_type", "query", "model", "prompt_tokens", 
+                        "completion_tokens", "total_tokens", "cost"]
+        
+        # Filter columns that actually exist in the dataframe
+        column_order = [col for col in column_order if col in df.columns]
+        
+        # Display dataframe with formatted columns
+        st.dataframe(df[column_order].style.format({
+            "cost": "${:.5f}",
+            "prompt_tokens": "{:,}",
+            "completion_tokens": "{:,}",
+            "total_tokens": "{:,}"
+        }), use_container_width=True)
+        
+        # Breakdown by model if we have multiple models
+        model_counts = df["model"].nunique()
+        if model_counts > 1:
+            st.subheader("Usage by Model")
+            model_usage = df.groupby("model").agg({
+                "prompt_tokens": "sum",
+                "completion_tokens": "sum", 
+                "total_tokens": "sum",
+                "cost": "sum"
+            }).reset_index()
+            
+            st.dataframe(model_usage.style.format({
+                "cost": "${:.5f}",
+                "prompt_tokens": "{:,}",
+                "completion_tokens": "{:,}",
+                "total_tokens": "{:,}"
+            }), use_container_width=True)
+            
+            # Visualization of token usage
+            try:
+                import matplotlib.pyplot as plt
+                
+                fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(10, 5))
+                
+                # Token distribution
+                ax1.pie(model_usage["total_tokens"], labels=model_usage["model"], autopct='%1.1f%%')
+                ax1.set_title("Token Distribution by Model")
+                
+                # Cost distribution
+                ax2.pie(model_usage["cost"], labels=model_usage["model"], autopct='%1.1f%%')
+                ax2.set_title("Cost Distribution by Model")
+                
+                st.pyplot(fig)
+            except Exception as e:
+                st.warning(f"Could not generate charts: {str(e)}")    
+
+
 else:
     # Main landing page
     st.header("Welcome to the RAG Pipeline with Airflow")

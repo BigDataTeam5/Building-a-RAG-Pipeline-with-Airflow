@@ -183,3 +183,7 @@ Q1.md
 chroma_db/*
 uploads/
 *.md
+!directory_structure_for_ragpipeline.md
+!chromadb_pipeline_filesturcture.md
+!pinecone_pipeline_workflow.md
+chunk_storage/*

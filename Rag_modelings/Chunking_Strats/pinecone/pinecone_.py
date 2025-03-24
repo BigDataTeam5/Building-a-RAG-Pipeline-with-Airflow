@@ -214,18 +214,41 @@ def process_multiple_files(file_paths: list[str]) -> None:
     
     print(f"\nTotal chunks processed across all files: {total_chunks}")
 
+def view_first_10_vectors():
+    """View the first 10 vectors in the Pinecone index"""
+    try:
+        # Query to get first 10 vectors
+        results = index.query(
+            vector=[0] * 1536,  # Dummy vector
+            top_k=10,
+            include_metadata=True
+        )
+        
+        # Get the first 10 items
+        first_10 = results.matches
+        
+        print("\nFirst 10 vectors in the index:")
+        for i, match in enumerate(first_10, 1):
+            print(f"\n{i}. Vector ID: {match.id}")
+            print(f"   File: {match.metadata.get('file_name', 'Unknown')}")
+            print(f"   Preview: {match.metadata['text_preview'][:100]}...")
+            
+    except Exception as e:
+        print(f"Error fetching vectors: {str(e)}")
+
 # Update the main section of your code
 if __name__ == "__main__":
-    # List of JSON files to process
-    json_file_paths = [
-        r"..\output\token_chunking\chunks.json",
-        r"..\output\character_chunking\chunks.json",
-        r"..\output\recursive_chunking\chunks.json",
-        # Add more file paths as needed
-    ]
+    # # List of JSON files to process
+    # json_file_paths = [
+    #     r"..\output\token_chunking\chunks.json",
+    #     r"..\output\character_chunking\chunks.json",
+    #     r"..\output\recursive_chunking\chunks.json",
+    #     # Add more file paths as needed
+    # ]
 
-    # Process all files first
-    process_multiple_files(json_file_paths)
+    # # Process all files first
+    # process_multiple_files(json_file_paths)
 
     # Then start the interactive Q&A
-    interactive_qa()
+    # interactive_qa()
+    view_first_10_vectors()

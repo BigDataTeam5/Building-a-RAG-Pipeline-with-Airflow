@@ -9,6 +9,8 @@ import asyncio
 from logger import api_logger, pdf_logger, error_logger, log_request, log_error
 import uvicorn
 import sys
+from pathlib import Path
+import json
 
 # Fix path handling for imports
 current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -19,6 +21,7 @@ sys.path.insert(0, project_root)  # Add project root to path
 from litellm_query_generator import generate_response, MODEL_CONFIGS
 from parsing_methods.doclingparsing import main as docling_parse
 from parsing_methods.mistralparsing import process_pdf as mistral_parse
+from parsing_methods.mistralparsing_userpdf import process_pdf as mistral_parse_pdf  # Updated import
 
 # Import modules with absolute paths
 from Rag_modelings.chromadb_pipeline import (
@@ -27,10 +30,8 @@ from Rag_modelings.chromadb_pipeline import (
 )
 from Rag_modelings.rag_pinecone import (
     query_pinecone_rag,  # Changed from run_rag_pipeline to query_pinecone_rag
-    initialize_connections,
-    prepare_vectors_for_upload,
-    upload_vectors_to_pinecone,
     process_document_with_chunking,
+    load_data_to_pinecone
 )
 
 
@@ -71,6 +72,7 @@ class RAGRequest(BaseModel):
 
 class EmbeddingRequest(BaseModel):
     markdown_path: str
+    markdown_filename: str
     rag_method: str  # "chromadb" or "pinecone"
     chunking_strategy: Optional[str] = "Semantic Chuking(Kamradt Method)"
     embedding_model: Optional[str] = "all-MiniLM-L6-v2"
@@ -79,19 +81,20 @@ class ManualEmbeddingRequest(BaseModel):
     text: str
     embedding_id: str
     rag_method: str  # "chromadb" or "pinecone"
-    chunking_strategy: Optional[str] = "Semantic Chuking(Kamradt Method)"
+    chunking_strategy: Optional[str]
     metadata: Optional[Dict[str, Any]] = None
 
 class QueryRequest(BaseModel):
     query: str
     embedding_id: Optional[str] = None  # For manual embeddings
-    markdown_path: Optional[str] = None  # For stored markdown files
+    markdown_path: Optional[str] = None  # For markdown embeddings
     rag_method: str  # "chromadb" or "pinecone"
     data_source: Optional[str] = None  # "Nvidia Dataset" or "PDF Upload"
     quarters: Optional[List[str]] = None  # List of quarters to filter by
     model_id: str = "gpt4o"
     similarity_metric: Optional[str] = "cosine"
     top_k: Optional[int] = 5
+    filter_criteria: Optional[dict] =None
     
 # Function to determine the quarter
 def get_quarter(date: str) -> str:
@@ -138,13 +141,48 @@ async def upload_pdf(
         markdown_path = os.path.join(MARKDOWN_DIR, f"{file_id}_{markdown_filename}")
 
         # Parse the PDF
-        parsed_content = ""
         if parser.lower() == "docling":
-            parsed_content = docling_parse(file_path)
+            try:
+                # Docling accepts file path
+                result_path = docling_parse(file_path)
+                
+                # Read the content from that file
+                with open(result_path, "r", encoding="utf-8") as f:
+                    parsed_content = f.read()
+            except Exception as e:
+                log_error(f"Error parsing PDF with Docling", e)
+                parsed_content = f"# Error Parsing PDF\n\nFailed to parse {filename} with Docling: {str(e)}"
+                
         elif parser.lower() == "mistral":
-            parsed_content = mistral_parse(file_path)
+            try:
+                # Mistral processing
+                pdf_path = Path(file_path)
+                output_dir = Path(os.path.dirname(markdown_path))
+                output_dir.mkdir(parents=True, exist_ok=True)
+                
+                # Call Mistral with the file path
+                result_path = mistral_parse_pdf(pdf_path, output_dir)
+                if result_path and os.path.exists(result_path):
+                    with open(result_path, "r", encoding="utf-8") as f:
+                        parsed_content = f.read()
+                        
+                    if result_path != markdown_path:
+                        with open(markdown_path, "w", encoding="utf-8") as f:
+                            f.write(parsed_content)
+                    api_logger.info(f"PDF parsed with Mistral: {result_path}")
+                else:
+                    # Handle the case where no result was returned
+                    error_msg = "Mistral parser did not return a valid output path"
+                    api_logger.error(error_msg)
+                    parsed_content = f"# Error Parsing PDF\n\nFailed to parse {filename} with Mistral: {error_msg}"
+            except Exception as e:
+                log_error(f"Error parsing PDF with Mistral", e)
+                parsed_content = f"# Error Parsing PDF\n\nFailed to parse {filename} with Mistral: {str(e)}"
+        else:
+            # Unsupported parser
+            raise HTTPException(status_code=400, detail=f"Unsupported parser: {parser}")
 
-        # <-- CHANGED: Always write the Markdown file, even if empty
+        # Write the content to our standard location
         with open(markdown_path, "w", encoding="utf-8") as f:
             f.write(parsed_content or "")
 
@@ -152,7 +190,8 @@ async def upload_pdf(
             "filename": filename,
             "saved_as": file_path,
             "file_id": file_id,
-            "markdown_path": markdown_path,  # Return this so the front-end can embed
+            "markdown_path": markdown_path,
+            "markdown_filename": markdown_filename,
             "parser": parser,
             "rag_method": rag_method,
             "chunking_strategy": chunking_strategy,
@@ -162,7 +201,7 @@ async def upload_pdf(
     except Exception as e:
         log_error(f"Error uploading PDF", e)
         raise HTTPException(status_code=500, detail=str(e))
-    
+        
 @app.get("/nvidia/quarters")
 async def get_nvidia_quarters():
     try:
@@ -231,17 +270,20 @@ async def rag_query(request: QueryRequest):
         elif request.rag_method.lower() == "pinecone":
             # Use query_pinecone_rag instead of run_rag_pipeline
             response = query_pinecone_rag(
-                query=request.query,
-                model_id=request.model_id,
-                similarity_metric=request.similarity_metric  # Pass similarity_metric from request
+            query=request.query,
+            model_id=request.model_id,
+            similarity_metric=request.similarity_metric,
+            top_k=request.top_k,
+            filter_criteria=request.filter_criteria
+            
             )
             
-            # Format the result to match the expected structure
+            # Format the result
             result = {
-                "answer": response.get("answer", "Error generating response"),
-                "usage": response.get("usage", {}),
-                "sources": response.get("sources", []),
-                "similarity_metric_used": response.get("similarity_metric_used", "cosine")
+            "answer": response.get("answer", "Error generating response"),
+            "usage": response.get("usage", {}),
+            "source": "Pinecone",
+            "chunks_used": response.get("chunks_used", 0)
             }
         
         else:
@@ -286,10 +328,11 @@ async def set_rag_config(parser: str, rag_method: str, chunking_strategy: str):
 async def create_embeddings(request: EmbeddingRequest, background_tasks: BackgroundTasks):
     """Create embeddings from a markdown file using ChromaDB or Pinecone"""
     try:
-        log_request(f"Creating embeddings for {request.markdown_path} using {request.rag_method}")
+        log_request(f"Creating embeddings for {request.markdown_filename} using {request.rag_method}")
         
         # Verify the markdown file exists
         markdown_path = request.markdown_path
+        markdown_filename = request.markdown_filename
         if not os.path.exists(markdown_path):
             markdown_path = os.path.join(MARKDOWN_DIR, os.path.basename(request.markdown_path))
             if not os.path.exists(markdown_path):
@@ -311,6 +354,7 @@ async def create_embeddings(request: EmbeddingRequest, background_tasks: Backgro
             process_embeddings,
             job_id,
             markdown_path,
+            markdown_filename,
             request.rag_method,
             request.chunking_strategy,
             request.embedding_model
@@ -319,12 +363,14 @@ async def create_embeddings(request: EmbeddingRequest, background_tasks: Backgro
         return {
             "job_id": job_id,
             "status": "processing",
-            "message": f"Creating embeddings for {os.path.basename(markdown_path)} using {request.rag_method}"
+            "message": f"Creating embeddings for {os.path.basename(markdown_path)} using {request.rag_method}",
+            "poll_interval": 2,  # Poll every 2 seconds
+            "status_endpoint": f"/rag/job-status/{job_id}"  # Provide the endpoint to poll
         }
     except Exception as e:
         log_error(f"Error creating embeddings", e)
         raise HTTPException(status_code=500, detail=str(e))
-
+    
 @app.post("/rag/manual-embedding")
 async def create_manual_embedding(request: ManualEmbeddingRequest):
     """Create embeddings from text provided directly by the user"""
@@ -386,9 +432,10 @@ async def list_embeddings():
 async def process_embeddings(
     job_id: str,
     markdown_path: str,
+    markdown_filename: str,
     rag_method: str,
     chunking_strategy: str,
-    embedding_model: str = None 
+    embedding_model: str = "all-MiniLM-L6-v2" 
 ):
     try:
         # Read markdown content
@@ -396,7 +443,7 @@ async def process_embeddings(
             markdown_content = f.read()
         
         # Extract file information
-        file_name = os.path.basename(markdown_path)
+        file_name = markdown_filename
         source_info = {
             "file_name": file_name,
             "file_path": markdown_path,
@@ -424,55 +471,37 @@ async def process_embeddings(
         # Process with Pinecone
         elif rag_method.lower() == "pinecone":
             try:
-                # Initialize Pinecone with logging
-                api_logger.info("Initializing Pinecone connection...")
-                client, _, index, _ = initialize_connections()
-                api_logger.info(f"Successfully connected to Pinecone index")
+                api_logger.info(f"Processing document with Pinecone using {chunking_strategy} strategy")
                 
-                # Process document with chunking
-                api_logger.info(f"Processing document with {chunking_strategy} strategy...")
-                chunks = process_document_with_chunking(markdown_content, chunking_strategy)
+                # Use the streamlined function which handles the entire process
+                result = load_data_to_pinecone(
+                    markdown_content=markdown_content,
+                    chunking_strategy=chunking_strategy,
+                    file_name=file_name
+                )
                 
-                if not chunks:
-                    raise ValueError("No chunks were generated from the document")
-                    
-                api_logger.info(f"Generated {len(chunks)} chunks from document")
-                
-                # Format chunks for Pinecone with metadata
-                formatted_chunks = []
-                for chunk in chunks:
-                    chunk_id = str(uuid.uuid4())
-                    formatted_chunks.append({
-                        "id": chunk_id,
-                        "text": chunk,
-                        "file_path": markdown_path,
-                        "file_name": os.path.basename(markdown_path),
+                if result["status"] == "success":
+                    # Update job status with detailed information
+                    job_store[job_id].update({
+                        "status": "completed",
+                        "chunks_total": result["total_chunks"],
+                        "vectors_uploaded": result["vectors_uploaded"],
                         "chunking_strategy": chunking_strategy,
+                        "timestamp": datetime.now().isoformat(),
+                        "file_name": file_name,
+                        "json_path": result.get("json_path")
+                    })
+                    api_logger.info(f"Successfully processed document: {result['vectors_uploaded']} vectors uploaded")
+                else:
+                    # Handle error case
+                    job_store[job_id].update({
+                        "status": "failed",
+                        "error": result.get("error", "Unknown error"),
                         "timestamp": datetime.now().isoformat()
                     })
-                
-                api_logger.info(f"Preparing vectors for {len(formatted_chunks)} chunks...")
-                vectors = prepare_vectors_for_upload(formatted_chunks, client)
-                
-                if not vectors:
-                    raise ValueError("No vectors were generated from the chunks")
-                    
-                api_logger.info(f"Uploading {len(vectors)} vectors to Pinecone...")
-                uploaded = upload_vectors_to_pinecone(vectors, index)
-                
-                # Update job status with detailed information
-                job_store[job_id].update({
-                    "status": "completed",
-                    "chunks_total": len(chunks),
-                    "vectors_uploaded": uploaded,
-                    "chunking_strategy": chunking_strategy,
-                    "timestamp": datetime.now().isoformat(),
-                    "file_name": os.path.basename(markdown_path)
-                })
-                
-                api_logger.info(f"Successfully processed document: {uploaded} vectors uploaded")
-                
+                    api_logger.error(f"Failed to process document: {result.get('error')}")
             except Exception as e:
+                # Handle exceptions
                 error_msg = f"Error processing document with Pinecone: {str(e)}"
                 api_logger.error(error_msg)
                 job_store[job_id].update({
@@ -480,7 +509,6 @@ async def process_embeddings(
                     "error": error_msg,
                     "timestamp": datetime.now().isoformat()
                 })
-                raise HTTPException(status_code=500, detail=error_msg)
         
         else:
             job_store[job_id].update({

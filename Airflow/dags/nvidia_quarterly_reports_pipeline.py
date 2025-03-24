@@ -658,12 +658,12 @@ upload_task = PythonOperator(
     provide_context=True,
     dag=dag
 )
-# docling_conversion_task = PythonOperator(
-#     task_id='docling_conversion',
-#     python_callable=convert_pdfs_docling,
-#     provide_context=True,
-#     dag=dag,
-# )
+docling_conversion_task = PythonOperator(
+    task_id='docling_conversion',
+    python_callable=convert_pdfs_docling,
+    provide_context=True,
+    dag=dag,
+)
 
 mistral_conversion_task = PythonOperator(
     task_id='mistral_conversion',
@@ -674,4 +674,4 @@ mistral_conversion_task = PythonOperator(
 
 
 # Set task dependencies
-main_operator >> upload_task >> [mistral_conversion_task]
+main_operator >> upload_task >> [docling_conversion_task,mistral_conversion_task]

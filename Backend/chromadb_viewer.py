@@ -200,4 +200,4 @@ if __name__ == "__main__":
         exit(1)
     
     # Test query with specific quarters
-    test_nvidia_query(query="what is nvidia", quarters=["2022Q1", "2022Q4"])
+    test_nvidia_query(query="what is nvidia revenue for year 2022 quarter 1", quarters=["2022Q1", "2022Q4"])
