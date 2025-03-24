@@ -12,3 +12,4 @@ pandas
 numpy
 tiktoken
 chromadb
+docling_core

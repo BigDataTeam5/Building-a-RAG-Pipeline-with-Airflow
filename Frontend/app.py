@@ -270,12 +270,13 @@ if "available_models" not in st.session_state:
 def process_rag_embeddings(file_id, markdown_path, rag_method, chunking_strategy):
     try:
         with st.spinner("⏳ Creating embeddings... This may take a moment."):
+            print("Creating embeddings with RAG pipeline...", markdown_path, rag_method, chunking_strategy)
             # Prepare the request payload as JSON body (not query params)
             payload = {
                 "markdown_path": markdown_path,
                 "rag_method": rag_method,
                 "chunking_strategy": chunking_strategy,
-                "embedding_model": "all-MiniLM-L6-v2"  # Add default embedding model
+                "embedding_model": "text-embedding-ada-002"  # Add default embedding model
             }
             
             # Submit to API with JSON body instead of query params
@@ -489,14 +490,39 @@ if st.session_state.get("next_clicked", False):
                     answer_text = result.get("answer") or result.get("response") or "No answer available"
                     st.markdown(answer_text)
                     
-                    # Show source documents if available
-                    if "sources" in result and result["sources"]:
-                        with st.expander("Source Documents", expanded=False):
-                            for idx, source in enumerate(result["sources"]):
-                                st.markdown(f"#### Source {idx+1}")
-                                st.markdown(f"**Document:** {source.get('document', 'Unknown')}")
-                                st.markdown(f"**Text:** {source.get('text', 'No text available')}")
+                    # Show source documents and match information
+                    if "matches" in result:
+                        with st.expander("Source Documents & Match Information", expanded=False):
+                            for idx, match in enumerate(result["matches"]):
+                                st.markdown(f"### Match {idx+1}")
+                                
+                                # Display match score
+                                st.markdown(f"**Similarity Score:** {match.get('score', 'N/A'):.4f}")
+                                
+                                # Display metadata
+                                metadata = match.get('metadata', {})
+                                if metadata:
+                                    st.markdown("**Metadata:**")
+                                    col1, col2 = st.columns(2)
+                                    with col1:
+                                        st.markdown(f"- File: `{metadata.get('file_name', 'Unknown')}`")
+                                        st.markdown(f"- Chunk Index: `{metadata.get('chunk_index', 'N/A')}`")
+                                    with col2:
+                                        st.markdown(f"- Length: `{metadata.get('original_length', 'N/A')}`")
+                                
+                                # Display text preview
+                                if 'text_preview' in metadata:
+                                    st.markdown("**Text Preview:**")
+                                    st.markdown("""```text
+{}```""".format(metadata['text_preview'].strip()))
+                                
                                 st.markdown("---")
+                    
+                    # Show additional information
+                    with st.expander("Query Details", expanded=False):
+                        st.markdown(f"**Total Matches Found:** {result.get('total_matches', 'N/A')}")
+                        st.markdown(f"**Model Used:** {st.session_state.llm_model}")
+                        st.markdown(f"**Similarity Metric:** {st.session_state.similarity_metric}")
 else:
     # Main landing page
     st.header("Welcome to the RAG Pipeline with Airflow")

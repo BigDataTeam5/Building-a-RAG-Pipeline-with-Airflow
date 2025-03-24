@@ -676,7 +676,7 @@ if __name__ == "__main__":
         
         # Process document
         logger.info("Processing test document...")
-        chunks = process_document_with_chunking(test_text, "Recursive Character/Token Chunking")
+        chunks = process_document_with_chunking(test_text, "Character-Based Chunking")
         logger.info(f"Created {len(chunks)} chunks")
         
         # Save chunks to JSON
