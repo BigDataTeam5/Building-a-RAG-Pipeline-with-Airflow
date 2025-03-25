@@ -32,45 +32,6 @@ except LookupError:
 STOPWORDS = set(stopwords.words("english"))
 STOPWORDS.update(['would', 'could', 'should', 'might', 'many', 'much'])
 
-def get_existing_connections():
-    """Get connections to existing Pinecone index without recreating it"""
-    try:
-        # Load environment variables
-        load_dotenv()
-        
-        # Initialize API keys
-        pinecone_api_key = os.getenv("PINECONE_API_KEY")
-        pinecone_env = os.getenv("PINECONE_ENV", "us-east-1")
-        index_name = os.getenv("PINECONE_INDEX_NAME", "pinecone-embeddings")
-        
-        # Sanitize index name
-        import re
-        index_name = re.sub(r'[^a-z0-9\-]', '-', index_name.lower())
-        
-        openai_api_key = os.getenv("OPENAI_API_KEY")
-        
-        if not pinecone_api_key or not openai_api_key:
-            raise ValueError("Missing required API keys in environment variables")
-            
-        # Initialize OpenAI client
-        client = OpenAI(api_key=openai_api_key)
-        
-        # Initialize Pinecone
-        pc = Pinecone(api_key=pinecone_api_key)
-        
-        # Get existing index
-        existing_indexes = pc.list_indexes().names()
-        if index_name not in existing_indexes:
-            logger.warning(f"Index {index_name} does not exist, please create it first")
-            # Return None for index to indicate it doesn't exist
-            return client, pc, None, index_name
-        
-        index = pc.Index(index_name)
-        logger.info(f"Connected to existing Pinecone index: {index_name}")
-        return client, pc, index, index_name
-    except Exception as e:
-        logger.error(f"Error connecting to existing index: {str(e)}")
-        raise
 
 
 def character_based_chunking(text, chunk_size=400, overlap=50):
@@ -79,77 +40,91 @@ def character_based_chunking(text, chunk_size=400, overlap=50):
         # Convert chunk_size from characters to approximate tokens
         token_size = chunk_size // 4  # Rough estimation of chars to tokens
         
-        # Use FixedTokenChunker with character mode
+        # Use FixedTokenChunker with correct parameters
         chunker = FixedTokenChunker(
             chunk_size=token_size, 
             chunk_overlap=overlap // 4,
-            token_encoding=encoding,
+            length_function=lambda text: len(encoding.encode(text)),
             use_chars=True  # Use character-based chunking
         )
         
-        chunks = chunker.chunk_text(text)
+        chunks = chunker.split_text(text)  # Changed from chunk_text to split_text
         logger.info(f"Created {len(chunks)} chunks using character-based chunking")
         return chunks
     except Exception as e:
         logger.error(f"Error in character-based chunking: {str(e)}")
         # Fallback to simple chunking if module fails
         return [text[i:i+chunk_size] for i in range(0, len(text), chunk_size-overlap)]
-
+    
+# Modify the recursive_chunking function to preserve base64 images
 def recursive_chunking(text, chunk_size=400, overlap=50):
-    """Recursive chunking using RecursiveTokenChunker."""
+    """Recursive chunking using RecursiveTokenChunker with special handling for base64 images."""
     try:
-        # Convert chunk_size from characters to approximate tokens
-        token_size = chunk_size // 4  # Rough estimation of chars to tokens
+        # First, detect and extract base64 images
+        import re
+        base64_pattern = r'(!\[.*?\]\(data:image\/[a-zA-Z]+;base64,[a-zA-Z0-9+/=]+\))'
         
-        # Use RecursiveTokenChunker with proper parameters
-        chunker = RecursiveTokenChunker(
-            token_size=token_size,
-            token_overlap=overlap // 4,
-            token_encoding=encoding  # Try with token_encoding
-        )
+        # Split the text by images
+        parts = re.split(base64_pattern, text)
         
-        chunks = chunker.chunk_text(text)
-        logger.info(f"Created {len(chunks)} chunks using recursive chunking")
+        # Process each part
+        chunks = []
+        for i, part in enumerate(parts):
+            # Check if this part is a base64 image
+            if i % 2 == 1 and part.startswith('![') and 'base64' in part:
+                # Images are kept as separate chunks with no splitting
+                chunks.append(part)
+                logger.info("Preserved base64 image as a separate chunk")
+            else:
+                # For text content, use standard recursive chunking
+                token_size = chunk_size // 4
+                
+                chunker = RecursiveTokenChunker(
+                    chunk_size=token_size,
+                    chunk_overlap=overlap // 4,
+                    length_function=lambda text: len(encoding.encode(text)),
+                    separators=["\n\n", "\n", ".", "?", "!", " ", ""]
+                )
+                
+                text_chunks = chunker.split_text(part)
+                chunks.extend(text_chunks)
+        
+        # Add a maximum chunk limit
+        max_chunks = 1000
+        if len(chunks) > max_chunks:
+            logger.warning(f"Too many chunks generated ({len(chunks)}). Limiting to {max_chunks} chunks.")
+            chunks = chunks[:max_chunks]
+            
+        logger.info(f"Created {len(chunks)} chunks using recursive chunking with image preservation")
         return chunks
     except Exception as e:
         logger.error(f"Error in recursive chunking: {str(e)}")
-        # Fallback to simple recursive implementation
-        paragraphs = text.split("\n\n")
-        chunks = []
-        current_chunk = ""
+        # Fall back to simple chunking without special image handling
+        return [text[i:i+chunk_size] for i in range(0, len(text), chunk_size-overlap)]                
         
-        for para in paragraphs:
-            if len(current_chunk) + len(para) > chunk_size:
-                if current_chunk:
-                    chunks.append(current_chunk)
-                current_chunk = para
-            else:
-                if current_chunk:
-                    current_chunk += "\n\n" + para
-                else:
-                    current_chunk = para
-                    
-        if current_chunk:
-            chunks.append(current_chunk)
-            
-        return chunks
-
 def semantic_chunking(text, avg_size=300, min_size=50):
-    """Semantic chunking using KamradtModifiedChunker."""
+    """Simplified semantic chunking with better fallback"""
     try:
         # Convert sizes from characters to approximate tokens
         token_avg_size = avg_size // 4  # Rough estimation of chars to tokens
         token_min_size = min_size // 4  # Rough estimation of chars to tokens
         
-        # Fixed parameter names for KamradtModifiedChunker
+        # Use KamradtModifiedChunker with simpler parameters
         chunker = KamradtModifiedChunker(
-            desired_chunk_size=token_avg_size,  # Try with desired_chunk_size
+            desired_chunk_size=token_avg_size,
             min_chunk_size=token_min_size,
-            token_encoding=encoding  # Use token_encoding param
+            token_encoding=encoding
         )
         
         chunks = chunker.chunk_text(text)
-        logger.info(f"Created {len(chunks)} chunks using Kamradt semantic chunking")
+        
+        # Add a maximum chunk limit to prevent memory issues
+        max_chunks = 500
+        if len(chunks) > max_chunks:
+            logger.warning(f"Too many chunks generated ({len(chunks)}). Limiting to {max_chunks}")
+            chunks = chunks[:max_chunks]
+            
+        logger.info(f"Created {len(chunks)} chunks using semantic chunking")
         return chunks
     except Exception as e:
         logger.error(f"Error in Kamradt semantic chunking: {str(e)}")
@@ -208,10 +183,9 @@ def process_document_with_chunking(text, chunking_strategy):
     except Exception as e:
         logger.error(f"Error chunking document: {str(e)}")
         raise
-
-# Task 1: Initialize connections and environment
-def initialize_connections():
-    """Initialize connections to OpenAI and Pinecone"""
+def get_or_create_connections(similarity_metric="cosine", file_name=None, namespace=None):
+    import re
+    """Get existing connections or create new ones based on similarity metric"""
     try:
         # Load environment variables
         load_dotenv()
@@ -219,51 +193,114 @@ def initialize_connections():
         # Initialize API keys
         pinecone_api_key = os.getenv("PINECONE_API_KEY")
         pinecone_env = os.getenv("PINECONE_ENV", "us-east-1")
-        index_name = os.getenv("PINECONE_INDEX_NAME", "pinecone-embeddings")
-        
-        # Sanitize index name to conform to Pinecone naming requirements
-        # Only allow lowercase alphanumeric characters and hyphens
-        import re
-        index_name = re.sub(r'[^a-z0-9\-]', '-', index_name.lower())
-        logger.info(f"Using Pinecone index name: {index_name}")
-        
         openai_api_key = os.getenv("OPENAI_API_KEY")
         
         if not pinecone_api_key or not openai_api_key:
             raise ValueError("Missing required API keys in environment variables")
-            
+        similarity_metric  = similarity_metric.replace("_", " ").lower()
+        
+        # Set index name based on similarity metric and sanitize it
+        if "cosine" in similarity_metric:
+            index_name = "embedding-cosine"  # Use hyphen instead of underscore
+        elif "euclidean" in similarity_metric:
+            index_name = "embedding-euclidean"  # Use hyphen instead of underscore
+        elif "dot" in similarity_metric:
+            index_name = "embedding-dot"  # Use hyphen instead of underscore
+        else:
+            index_name = "embedding-cosine"  # Use hyphen instead of underscore
+            logger.warning(f"Unknown similarity metric '{similarity_metric}', using default 'cosine'")
+        
+        # Ensure index name follows Pinecone's naming convention (lowercase alphanumeric with hyphens)
+        index_name = index_name.lower().replace('_', '-')
+        
+        logger.info(f"Using Pinecone index: {index_name} with {similarity_metric} similarity")
+        
         # Initialize OpenAI client
         client = OpenAI(api_key=openai_api_key)
         
         # Initialize Pinecone
         pc = Pinecone(api_key=pinecone_api_key)
         
-        # Check if index already exists and delete it if it does
+        # Check if index already exists
         existing_indexes = pc.list_indexes().names()
-        if index_name in existing_indexes:
-            logger.info(f"Deleting existing Pinecone index: {index_name}")
-            pc.delete_index(index_name)
-            logger.info(f"Successfully deleted existing index: {index_name}")
         
-        # Create a new Pinecone index
-        logger.info(f"Creating new Pinecone index: {index_name}")
-        pc.create_index(
-            name=index_name,
-            dimension=1536,  # Changed to match text-embedding-ada-002 dimension
-            metric="cosine",
-            spec=ServerlessSpec(
-                cloud='aws',
-                region=pinecone_env
+        # Create the index if it doesn't exist
+        if index_name not in existing_indexes:
+            logger.info(f"Creating new Pinecone index: {index_name}")
+            
+            # Set metric based on similarity_metric
+            if "cosine" in similarity_metric:
+                metric = "cosine"
+            elif "euclidean" in similarity_metric:
+                metric = "euclidean"
+            elif "dot" in similarity_metric:
+                metric = "dotproduct"
+            else:
+                metric = "cosine"
+                
+            pc.create_index(
+                name=index_name,
+                dimension=1536,  # Matches text-embedding-ada-002 dimension
+                metric=metric,
+                spec=ServerlessSpec(
+                    cloud='aws',
+                    region=pinecone_env
+                )
             )
-        )
+            logger.info(f"Successfully created new index: {index_name}")
+        else:
+            logger.info(f"Connected to existing Pinecone index: {index_name}")
+        
+        # Get the index
         index = pc.Index(index_name)
         
+        # Generate namespace from filename if not provided
+        if namespace is None and file_name:
+            # Sanitize namespace too - only lowercase alphanumeric and hyphens
+            namespace = re.sub(r'[^a-z0-9-]', '-', os.path.splitext(file_name)[0].lower())
+            logger.info(f"Using auto-generated namespace: {namespace}")
+        elif namespace is None:
+            namespace = f"default-{int(time.time())}"
+            logger.info(f"No namespace provided, using: {namespace}")
+        else:
+            # Ensure namespace follows naming convention
+            namespace = re.sub(r'[^a-z0-9-]', '-', namespace.lower())
+        
         logger.info("Connections initialized successfully")
-        return client, pc, index, index_name
+        return client, pc, index, index_name, namespace
+        
     except Exception as e:
         logger.error(f"Error initializing connections: {str(e)}")
         raise
 
+# Add function to extract base64 images from markdown text
+def extract_base64_images(text):
+    """Extract base64 images from markdown content"""
+    import re
+    
+    # Pattern to match markdown image syntax with base64 content
+    pattern = r'!\[.*?\]\(data:image\/[a-zA-Z]+;base64,([a-zA-Z0-9+/=]+)\)'
+    
+    # Find all matches
+    matches = re.findall(pattern, text)
+    
+    # Store extracted images
+    images = []
+    for i, base64_str in enumerate(matches):
+        try:
+            # Store image data
+            images.append({
+                "id": f"img_{i}",
+                "base64_data": base64_str,
+                "format": "base64"
+            })
+            logger.info(f"Extracted base64 image #{i+1}")
+        except Exception as e:
+            logger.error(f"Error processing base64 image: {str(e)}")
+    
+    return images
+
+# Update save_chunks_to_json to handle base64 images
 def save_chunks_to_json(chunks, index_name):
     """Save full chunks to a JSON file for retrieval during querying
     
@@ -290,16 +327,47 @@ def save_chunks_to_json(chunks, index_name):
                 text = chunk
                 # Create a hash-based ID for consistent retrieval
                 chunk_id = hashlib.md5(text.encode('utf-8')).hexdigest()
+                
+                # Extract base64 images if any
+                images = extract_base64_images(text)
+                
+                # Store the full chunk with its ID
+                chunk_data = {
+                    "text": text,
+                    "index": i,
+                    "length": len(text)
+                }
+                
+                # Add images if found
+                if images:
+                    chunk_data["images"] = images
+                    
+                chunks_data[chunk_id] = chunk_data
             else:
+                # Handle dictionary chunk format
                 text = chunk.get("text", "")
                 chunk_id = str(chunk.get("id", hashlib.md5(text.encode('utf-8')).hexdigest()))
-            
-            # Store the full chunk with its ID
-            chunks_data[chunk_id] = {
-                "text": text,
-                "index": i,
-                "length": len(text)
-            }
+                
+                # Extract base64 images if any
+                images = extract_base64_images(text)
+                
+                # Create base chunk data
+                chunk_data = {
+                    "text": text,
+                    "index": i,
+                    "length": len(text)
+                }
+                
+                # Add images if found
+                if images:
+                    chunk_data["images"] = images
+                
+                # Store with any additional fields from the original chunk
+                for key, value in chunk.items():
+                    if key not in ["text", "id"]:
+                        chunk_data[key] = value
+                        
+                chunks_data[chunk_id] = chunk_data
         
         # Save to JSON file
         with open(json_path, 'w', encoding='utf-8') as f:
@@ -311,7 +379,7 @@ def save_chunks_to_json(chunks, index_name):
     except Exception as e:
         logger.error(f"Error saving chunks to JSON: {str(e)}")
         return None
-    
+        
 # Add a function to load chunks from the JSON file
 def load_chunks_from_json(chunk_id, index_name):
     """Load a specific chunk from the JSON file by ID
@@ -394,81 +462,6 @@ def get_embedding(text: str, client):
         logger.error(f"Error generating embedding: {str(e)}")
         raise
 
-def batch_vectors(vectors, batch_size=100):
-    """Yield vectors in batches"""
-    for i in range(0, len(vectors), batch_size):
-        yield vectors[i:i + batch_size]
-
-# Update the prepare_vectors_for_upload function
-def prepare_vectors_for_upload(chunks, client, index_name):
-    """Convert chunks to vectors for Pinecone upload"""
-    try:
-        logger.info(f"Preparing {len(chunks)} chunks for vectorization")
-        
-        # First, save the full chunks to a JSON file
-        json_path = save_chunks_to_json(chunks, index_name)
-        
-        vectors = []
-        for i, chunk in enumerate(chunks):
-            if isinstance(chunk, str):
-                text = chunk
-                # Create a consistent ID based on content hash
-                chunk_id = hashlib.md5(text.encode('utf-8')).hexdigest()
-            else:
-                text = chunk.get("text", "")
-                chunk_id = str(chunk.get("id", hashlib.md5(text.encode('utf-8')).hexdigest()))
-            
-            try:
-                vector = get_embedding(text, client)
-                
-                # Store truncated preview in metadata but keep ID for full retrieval
-                preview = text[:1000] if len(text) > 1000 else text
-                vectors.append({
-                    "id": chunk_id,
-                    "values": vector,
-                    "metadata": {
-                        "text_preview": preview,  # Truncated preview
-                        "chunk_id": chunk_id,  # ID for retrieval from JSON
-                        "file_name": f"chunk_{i}",
-                        "original_length": len(text),
-                        "full_text_path": json_path  # Path to the JSON file
-                    }
-                })
-                logger.info(f"Processed chunk {chunk_id} with length {len(text)}")
-            except Exception as e:
-                logger.error(f"Error processing chunk {chunk_id}: {str(e)}")
-                continue
-                
-        logger.info(f"Prepared {len(vectors)} vectors for upload")
-        return vectors
-    except Exception as e:
-        logger.error(f"Error preparing vectors: {str(e)}")
-        raise
-
-# Task 5: Upload vectors to Pinecone
-def upload_vectors_to_pinecone(vectors, index, batch_size=100):
-    """Upload prepared vectors to Pinecone index in batches"""
-    try:
-        total_uploaded = 0
-        batch_count = 0
-        
-        logger.info(f"Uploading {len(vectors)} vectors to Pinecone in batches of {batch_size}")
-        for batch in batch_vectors(vectors, batch_size):
-            batch_count += 1
-            try:
-                index.upsert(batch)
-                total_uploaded += len(batch)
-                logger.info(f"Batch {batch_count}: Uploaded {len(batch)} vectors. Total: {total_uploaded}/{len(vectors)}")
-            except Exception as e:
-                logger.error(f"Error uploading batch {batch_count}: {str(e)}")
-                continue
-                
-        logger.info(f"Finished uploading. Total vectors uploaded: {total_uploaded}")
-        return total_uploaded
-    except Exception as e:
-        logger.error(f"Error in upload process: {str(e)}")
-        raise
-
 # Task 6: Search Pinecone for relevant chunks
 def get_query_embedding(query_text, client):
     """Generate embedding for the query text"""
@@ -546,30 +539,70 @@ def count_tokens(text, model="gpt-3.5-turbo"):
         logger.error(f"Error counting tokens: {str(e)}")
         # Rough estimation as fallback
         return len(text) // 4
+    
 
+def extract_links_from_text(text):
+    """Extract URLs from text using regex pattern matching"""
+    import re
+    # Pattern to match URLs with or without protocol
+    url_pattern = r'https?://[^\s)]+|www\.[^\s)]+|(?<=\()http[^\s)]+(?=\))'
+    matches = re.findall(url_pattern, text)
+    return matches
 
 # Task: Enhanced response generation using LiteLLM
 def generate_response(query, context_chunks, client, model_id="gpt-3.5-turbo", metadata=None):
-    """Generate response using LiteLLM with context chunks
-    
-    Args:
-        query (str): User query
-        context_chunks (list): Retrieved context chunks
-        client: OpenAI client (not used with LiteLLM)
-        model_id (str): Model ID for response generation
-        metadata (list): Optional metadata for chunks
-        
-    Returns:
-        dict: Response and usage information
-    """
+    """Generate response using LiteLLM with context chunks"""
     try:
         logger.info(f"Generating response for query with {len(context_chunks)} context chunks using LiteLLM")
 
+        # Check if this is a link extraction request
+        query_lower = query.lower()
+        is_link_request = any(term in query_lower for term in ["links", "urls", "link", "url"]) and \
+                         any(term in query_lower for term in ["list", "show", "extract", "get", "what", "all"])
+        
+        # For link extraction requests, directly parse the chunks
+        if is_link_request:
+            all_links = []
+            source_texts = []
+            
+            # Extract text from chunks
+            if isinstance(context_chunks[0], dict):
+                for chunk in context_chunks:
+                    chunk_text = chunk.get('text', '') or chunk.get('metadata', {}).get('text_preview', '')
+                    source_texts.append(chunk_text)
+            else:
+                source_texts = context_chunks
+            
+            # Extract links from each chunk
+            for text in source_texts:
+                links = extract_links_from_text(text)
+                all_links.extend(links)
+            
+            # Remove duplicates while preserving order
+            unique_links = []
+            for link in all_links:
+                if link not in unique_links:
+                    unique_links.append(link)
+            
+            # Format response
+            if unique_links:
+                link_list = "\n".join([f"- {link}" for link in unique_links])
+                response_text = f"Here are all the links found in the NVIDIA document:\n\n{link_list}"
+            else:
+                response_text = "No links were found in the retrieved document chunks."
+            
+            # Return formatted response
+            return {
+                "content": response_text,
+                "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+                "model": model_id
+            }
+        
+        # For non-link requests, use standard LiteLLM response generation
         # Extract text and prepare chunks for LiteLLM
         chunk_texts = []
         formatted_metadata = []
         
-    
         if isinstance(context_chunks[0], dict):
             for chunk in context_chunks:
                 # Extract text from chunk
@@ -606,118 +639,48 @@ def generate_response(query, context_chunks, client, model_id="gpt-3.5-turbo", m
         }
     except Exception as e:
         logger.error(f"Error generating response with LiteLLM: {str(e)}")
-        return {"error": str(e)}
-        
-# Task 8: Enhanced Interactive Q&A function
-def enhanced_interactive_qa(client, index, query, model_id, similarity_metric="cosine", top_k=5):
-    """Enhanced Q&A function with LiteLLM and chunking options"""
-    logger.info("Processing Q&A request")
-    
-    try:
-        # Search for relevant chunks with specified similarity metric
-        results = search_pinecone(query, client, index, top_k=5)
-        
-        if not results['matches']:
-            return {"answer": "No relevant information found.", "usage": {}}
-        
-        # Debug the matches
-        logger.info(f"Retrieved {len(results['matches'])} matches for query")
-        for match in results['matches']:
-            logger.info(f"Match score: {match['score']}, Preview: {match['metadata'].get('text_preview', '')[:100]}")
-        
-        # Enhanced formatting of sources
-        sources_for_response = []
-        for match in results['matches']:
-            metadata = match['metadata']
-            sources_for_response.append({
-                "score": match['score'],
-                "file": metadata.get('file_name', 'Unknown'),
-                "preview": metadata.get('text_preview', '')[:150],
-                "similarity_metric": metadata.get('similarity_metric_used', similarity_metric)
-            })
-        
-        # Generate response using chunks
-        response_data = generate_response(
-            query, 
-            results['matches'], 
-            client,
-            model_id=model_id,
-            metadata=[match['metadata'] for match in results['matches']]
-        )
-        
-        return {
-            "answer": response_data["content"],
-            "usage": response_data["usage"],
-            "sources": sources_for_response,
-            "similarity_metric_used": similarity_metric
-        }
+        return {"error": str(e), "content": str(e)}
             
-    except Exception as e:
-        logger.error(f"Error in Q&A: {str(e)}")
-        raise
 
-# Adding extract keyword function for enhanced metadata and search capabilities
-def extract_keywords(text, max_keywords=10):
-    """Extract key terms from text for better searchability using NLTK"""
-    try:
-        # Tokenize, lowercase, remove stopwords and very short words
-        words = text.lower().replace('\n', ' ').split()
-        words = [w.strip('.,!?()[]{}"\'') for w in words]
-        words = [w for w in words if w and w not in STOPWORDS and len(w) > 3]
-        
-        # Count word frequency
-        from collections import Counter
-        word_counts = Counter(words)
-        
-        # Return top keywords
-        return [word for word, _ in word_counts.most_common(max_keywords)]
-    except Exception as e:
-        logger.error(f"Error extracting keywords: {str(e)}")
-        return []
-    
 
-def load_data_to_pinecone(markdown_content, chunking_strategy, file_name=None, namespace=None):
+def load_data_to_pinecone(markdown_content, chunking_strategy, file_name=None, namespace=None, similarity_metric="cosine_similarity"):
     """
-    Comprehensive function to process document and load vectors into Pinecone
-    
-    Args:
-        markdown_content (str): Content to process and embed
-        chunking_strategy (str): Strategy for chunking the document
-        file_name (str, optional): Name of the source file
-        namespace (str, optional): Pinecone namespace to store vectors in
-        
-    Returns:
-        dict: Status of the embedding process with details
+    Optimized function to process document and load vectors into Pinecone
+    with minimal metadata storage
     """
     try:
+        # Step 0: Get existing connections and setup
         logger.info(f"Starting process to load data to Pinecone with {chunking_strategy} chunking")
-        
-        # Step 1: Check for existing connections
-        client, _, index, index_name = get_existing_connections()
-        
-        # If index doesn't exist, create a new one
-        if index is None:
-            logger.info("No existing index found. Creating new Pinecone index...")
-            client, _, index, index_name = initialize_connections()
-        
-        # Generate namespace from filename if not provided
-        if namespace is None and file_name:
-            namespace = os.path.splitext(file_name)[0].lower().replace(" ", "_")
-            logger.info(f"Using auto-generated namespace: {namespace}")
-        elif namespace is None:
-            namespace = f"default_{int(time.time())}"
-            logger.info(f"No namespace provided, using: {namespace}")
-        
-        # Step 2: Process document with chunking
+        similarity_metric = similarity_metric.replace("_", " ").lower()
+        client, _, index, index_name, namespace = get_or_create_connections(
+            similarity_metric=similarity_metric,
+            file_name=file_name,
+            namespace=namespace
+        )
+
+        # Log information about connections
+        logger.info(f"Connected to Pinecone index: {index_name}")
+        if namespace:
+            logger.info(f"Using namespace: {namespace}")
+        else:
+            logger.warning("No namespace specified, using default")
+
+        # Verify file_name is available
+        if file_name:
+            logger.info(f"Processing document: {file_name}")
+        else:
+            logger.info("No file name provided, using unnamed document")
+            
+        # Step 2: Process document with chunking (optimized to handle base64 images)
         logger.info(f"Processing document with {chunking_strategy} strategy...")
         chunks = process_document_with_chunking(markdown_content, chunking_strategy)
         if not chunks:
             raise ValueError("No chunks were generated from the document")
         logger.info(f"Generated {len(chunks)} chunks from document")
         
-        doc_title=None
+        doc_title = None
         if file_name:
-            #remove the externsion and replace underscore 
+            # Remove the extension and replace underscore 
             doc_title = os.path.splitext(file_name)[0].replace("_", " ")
             logger.info(f"Document title extracted from filename: {doc_title}")
             
@@ -726,14 +689,14 @@ def load_data_to_pinecone(markdown_content, chunking_strategy, file_name=None, n
         if not json_path:
             logger.warning("Failed to save chunks to JSON, vector retrieval may be limited")
         
-        # Step 3.2 : Parse document structure (basic impl)
-        doc_structure  = {"title": doc_title or "Unknown"}
+        # Step 3.2: Parse document structure (basic impl)
+        doc_structure = {"title": doc_title or "Unknown"}
         try:
             headings = []
             for line in markdown_content.split("\n"):
                 if line.startswith("#"):
                     level = len(line) - len(line.lstrip("#"))
-                    text = line.strip("#")
+                    text = line.strip("#").strip()
                     headings.append({"level": level, "text": text})
             if headings:
                 doc_structure["headings"] = headings
@@ -742,7 +705,7 @@ def load_data_to_pinecone(markdown_content, chunking_strategy, file_name=None, n
         except Exception as e:
             logger.error(f"Error extracting document structure: {str(e)}")
         
-        # Step 4: Prepare vectors with enhanced metadata
+        # Step 4: Prepare vectors with MINIMAL metadata
         logger.info(f"Preparing vectors for {len(chunks)} chunks...")
         vectors = []
         
@@ -755,19 +718,24 @@ def load_data_to_pinecone(markdown_content, chunking_strategy, file_name=None, n
             text = chunk if isinstance(chunk, str) else chunk.get("text", "")
             chunk_id = hashlib.md5(text.encode('utf-8')).hexdigest()
             
-            # Check chunk size before embedding
-            token_count = len(encoding.encode(text))
-            if token_count > 8000:
-                logger.warning(f"Chunk {i+1} has {token_count} tokens, which exceeds the limit. It will be truncated.")
+            # Check if this chunk contains a base64 image
+            has_image = "base64" in text and "![" in text
+            
+            # Skip token counting for base64 images
+            if not has_image:
+                # Check chunk size before embedding
+                token_count = len(encoding.encode(text))
+                if token_count > 8000:
+                    logger.warning(f"Chunk {i+1} has {token_count} tokens, which exceeds the limit. It will be truncated.")
+                    text = truncate_text_to_token_limit(text, 8000)
+            else:
+                logger.info(f"Chunk {i+1} contains base64 image(s), preserving as-is")
             
             try:
-                # Get embedding for chunk (will be truncated internally if needed)
+                # Get embedding for chunk
                 vector = get_embedding(text, client)
                 successful_embeddings += 1
                 
-                # Create preview for metadata (truncated version)
-                preview = text[:1000] if len(text) > 1000 else text
-
                 # Find most relevant heading for this chunk
                 chunk_heading = "Unknown section"
                 if "headings" in doc_structure:
@@ -777,25 +745,21 @@ def load_data_to_pinecone(markdown_content, chunking_strategy, file_name=None, n
                             chunk_heading = h["text"]
                             break
                 
-                # Add vector with metadata
+                
+                metadata = {
+                    "chunk_id": chunk_id,  # Essential for retrieving from JSON
+                    "file_name": file_name or f"Unnamed-{i}",
+                    "doc_title": doc_title or "Unknown",
+                    "section": chunk_heading,
+                    "has_image": has_image,  # Flag if chunk contains base64 images
+                    "chunks_path": json_path  # Path to retrieve full content
+                }
+                
+                # Add vector with minimal metadata
                 vectors.append({
                     "id": chunk_id,
                     "values": vector,
-                    "metadata": {
-                        "text_preview": preview,
-                        "chunk_id": chunk_id,
-                        "file_name": file_name or f"Unnamed Document {i+1}",
-                        "doc_title": doc_title or "Unknown",
-                        "section": chunk_heading,
-                        "original_length": len(text),
-                        "token_count": token_count,
-                        "full_text_path": json_path,
-                        "chunking_strategy": chunking_strategy,
-                        "chunk_index": i,
-                        "total_chunks": len(chunks),
-                        "keywords": extract_keywords(text),
-                        "namespace": namespace  # Include namespace in metadata
-                    }
+                    "metadata": metadata
                 })
                 
                 # Log progress regularly
@@ -828,20 +792,24 @@ def load_data_to_pinecone(markdown_content, chunking_strategy, file_name=None, n
             total_uploaded += len(batch)
             logger.info(f"Uploaded batch {i//batch_size + 1}: {len(batch)} vectors to namespace '{namespace}'. Total: {total_uploaded}/{len(vectors)}")
         
-        # Get index stats to verify upload
-        stats = index.describe_index_stats()
-        logger.info(f"Index now contains {stats.total_vector_count} vectors total")
-        
-        # Check namespace statistics
-        namespace_stats = stats.namespaces.get(namespace, {})
-        vector_count = namespace_stats.get("vector_count", 0)
-        logger.info(f"Namespace '{namespace}' now contains {vector_count} vectors")
+        time.sleep(5)
+        try:
+            # Get index stats to verify upload
+            stats = index.describe_index_stats()
+            logger.info(f"Index now contains {stats.total_vector_count} vectors total")
+
+            if namespace in stats.namespaces:
+                vector_count = stats.namespaces[namespace].vector_count
+                logger.info(f"Namespace '{namespace}' now contains {vector_count} vectors")
+            else:
+                logger.warning(f"Namespace '{namespace}' not found in index stats")
+        except Exception as e:
+            logger.warning(f"Could not retrieve final stats: {str(e)}")
         
         return {
             "status": "success",
             "total_chunks": len(chunks),
             "successful_embeddings": successful_embeddings,
-            "failed_embeddings": failures,
             "vectors_uploaded": total_uploaded,
             "index_name": index_name,
             "json_path": json_path,
@@ -852,28 +820,16 @@ def load_data_to_pinecone(markdown_content, chunking_strategy, file_name=None, n
     except Exception as e:
         logger.error(f"Error loading data to Pinecone: {str(e)}")
         return {"status": "failed", "error": str(e)}
-    
-def query_pinecone_rag(query, model_id="gpt4o", similarity_metric="cosine", top_k=5, 
-                      filter_criteria=None, namespace=None, search_all_namespaces=False):
+
+def query_pinecone_rag(query, model_id, similarity_metric="cosine", top_k=5, 
+                      namespace=None,json_path=None):
     """
-    Query the Pinecone database and generate a response using RAG with hybrid search
-    
-    Args:
-        query (str): User query to process
-        model_id (str): Model ID for response generation (must be in MODEL_CONFIGS)
-        similarity_metric (str): Similarity metric for vector search
-        top_k (int): Number of top results to retrieve
-        filter_criteria (dict, optional): Metadata filters to narrow search
-        namespace (str, optional): Specific namespace to search in
-        search_all_namespaces (bool): Whether to search across all namespaces
-        
-    Returns:
-        dict: Response including answer, sources and usage information
+    Optimized query function for Pinecone RAG that reliably retrieves content from JSON files
     """
     try:
-        # Validate model_id against available models in MODEL_CONFIGS
+        # Validate model_id against available models
         from Backend.litellm_query_generator import MODEL_CONFIGS
-        if model_id not in MODEL_CONFIGS:
+        if (model_id not in MODEL_CONFIGS):
             logger.warning(f"Model {model_id} not found in MODEL_CONFIGS. Using default model instead.")
             model_id = next(iter(MODEL_CONFIGS.keys()))
             logger.info(f"Using model: {model_id}")
@@ -881,7 +837,10 @@ def query_pinecone_rag(query, model_id="gpt4o", similarity_metric="cosine", top_
             logger.info(f"Processing RAG query: '{query}' using model: {model_id}")
         
         # Step 1: Connect to existing index
-        client, _, index, index_name = get_existing_connections()
+        client, _, index, index_name, current_namespace = get_or_create_connections(
+            similarity_metric=similarity_metric,
+            namespace=namespace
+        )
         
         if index is None:
             logger.error("No Pinecone index exists. Please create embeddings first.")
@@ -896,129 +855,23 @@ def query_pinecone_rag(query, model_id="gpt4o", similarity_metric="cosine", top_
             logger.warning("No namespaces found in the index")
             return {"error": "No data found in the index. Please create embeddings first."}
         
-        # Step 2: Analyze query intention and preprocess
-        query_lower = query.lower()
-        
-        # Detect TOC (table of contents) specific queries
-        toc_query = False
-        if ("table of contents" in query_lower or "toc" in query_lower or 
-            "chapters" in query_lower or "sections" in query_lower):
-            toc_query = True
-            logger.info("Detected table of contents query")
-        
-        # Detect specific document/book queries using regex and keyword analysis
-        target_document = None
-        import re
-        
-        # Look for quoted document titles like "Kelly Vickey"
-        quoted_titles = re.findall(r'"([^"]*)"', query)
-        quoted_titles.extend(re.findall(r"'([^']*)'", query))
-        
-        # Look for document titles after indicator words like "book", "document", etc.
-        doc_indicators = ["book", "document", "report", "paper", "titled", "called", "named"]
-        for indicator in doc_indicators:
-            if indicator in query_lower:
-                # Find potential title after the indicator word
-                match = re.search(rf"{indicator}\s+(\w+(?:\s+\w+){0,5})", query_lower)
-                if match:
-                    quoted_titles.append(match.group(1))
-        
-        # Direct keyword check (e.g., "kelly_vickey") - convert to spaces for matching
-        keywords = extract_keywords(query)
-        potential_docs = []
-        for keyword in keywords:
-            if "_" in keyword:
-                potential_docs.append(keyword.replace("_", " "))
-            # Also check for potential document titles by their length and uniqueness
-            if len(keyword) > 5 and keyword not in STOPWORDS:
-                potential_docs.append(keyword)
-        
-        # Combine all potential document titles
-        generic_titles = {"document", "report", "paper"}
-        all_potential_titles = quoted_titles + potential_docs
-        if all_potential_titles:
-            # Use the longest potential title as it's likely to be most specific
-            target_document = max(all_potential_titles, key=len)
-            logger.info(f"Targeting specific document: '{target_document}'")
-            
-            # If targeting specific document and namespace not specified, try to find matching namespace
-            if target_document.lower() in generic_titles:
-                target_document = None
-            elif target_document and not namespace and not search_all_namespaces:
-                target_doc_key = target_document.lower().replace(" ", "_")
-                matching_namespaces = [ns for ns in available_namespaces 
-                                     if target_doc_key in ns]
-                if matching_namespaces:
-                    namespace = matching_namespaces[0]
-                    logger.info(f"Auto-selected namespace '{namespace}' for document '{target_document}'")
-        
-        
-        # Step 3: Build filter based on query analysis
-        combined_filter = {}
-        
-        # Add document filter if targeting a specific document
-        if target_document:
-            # Split the target document into words for partial matching
-            target_words = target_document.lower().split()
-            doc_filter = {
-                "$or": [
-                    {"doc_title": {"$in": target_words}},
-                    {"file_name": {"$in": target_words}},
-                    {"keywords": {"$in": target_words}}
-                ]
-            }
-            combined_filter = doc_filter
-        
-        # Add TOC filter if needed
-        if toc_query:
-            toc_filter = {
-                "$or": [
-                    {"section": {"$in": ["table of content", "toc", "content"]}},
-                    {"keywords": {"$in": ["toc", "content", "table", "chapter", "section"]}},
-                ]
-            }
-            
-            if combined_filter:
-                # Combine with existing document filter with AND
-                combined_filter = {"$and": [combined_filter, toc_filter]}
-            else:
-                combined_filter = toc_filter
-        
-        # Merge with user-provided filter_criteria if any
-        if filter_criteria:
-            if combined_filter:
-                final_filter = {"$and": [combined_filter, filter_criteria]}
-            else:
-                final_filter = filter_criteria
-        else:
-            final_filter = combined_filter
-        
-        logger.info(f"Using filter: {final_filter}")
-        
-        # Step 4: Perform semantic search with embedding
-        # Extract important keywords for hybrid scoring
-        search_keywords = [word.lower() for word in query.split() 
-                        if len(word) > 3 and word.lower() not in STOPWORDS]
-        
-        logger.info(f"Using keywords for hybrid search: {search_keywords}")
+        if namespace and namespace not in available_namespaces:
+            logger.warning(f"Namespace '{namespace}' not found. Searching all namespaces instead.")
+            namespace = None
         
         # Generate query embedding
         query_embedding = get_query_embedding(query, client)
         
-        # Search Pinecone - get more results for hybrid reranking
-        fetch_k = top_k * 3 if search_keywords else top_k
-        
-        # Determine which namespaces to search
-        if namespace and not search_all_namespaces:
+        # Simplified search approach
+        if namespace:
             # Search in specific namespace
             logger.info(f"Searching in specific namespace: {namespace}")
             
             # Perform the vector search with namespace
             results = index.query(
                 vector=query_embedding,
-                top_k=fetch_k,
+                top_k=top_k,
                 include_metadata=True,
-                filter=final_filter if final_filter else None,
                 namespace=namespace
             )
             
@@ -1028,10 +881,6 @@ def query_pinecone_rag(query, model_id="gpt4o", similarity_metric="cosine", top_
             # Search across all namespaces
             logger.info("Searching across all namespaces")
             
-            if not available_namespaces:
-                logger.warning("No namespaces available to search")
-                return {"error": "No namespaces available to search"}
-            
             # Multi-namespace search approach: search each namespace separately and combine results
             all_matches = []
             
@@ -1039,268 +888,181 @@ def query_pinecone_rag(query, model_id="gpt4o", similarity_metric="cosine", top_
                 logger.info(f"Searching namespace: {ns}")
                 ns_results = index.query(
                     vector=query_embedding,
-                    top_k=max(3, fetch_k // len(available_namespaces)),  # At least 3 results per namespace
+                    top_k=max(3, top_k // len(available_namespaces)),  # At least 3 results per namespace
                     include_metadata=True,
-                    filter=final_filter if final_filter else None,
                     namespace=ns
                 )
                 
                 # Add namespace information to metadata
                 for match in ns_results.matches:
-                    match.metadata["namespace"] = ns
+                    if not hasattr(match.metadata, 'namespace'):
+                        match.metadata["namespace"] = ns
                 
                 all_matches.extend(ns_results.matches)
                 logger.info(f"Found {len(ns_results.matches)} matches in namespace '{ns}'")
             
-            # Sort all matches by score (descending)
+            # Sort all matches by score (descending) and take top_k
             all_matches.sort(key=lambda x: x.score, reverse=True)
             
             # Create a new results object with the top matches
             from types import SimpleNamespace
             results = SimpleNamespace()
-            results.matches = all_matches[:fetch_k]
+            results.matches = all_matches[:top_k]
             
             logger.info(f"Combined results from all namespaces: {len(results.matches)} matches")
         
         if not results.matches:
             logger.warning("No matches found in search results")
             return {
-                "answer": f"I couldn't find any relevant information about {target_document if target_document else 'your query'} in the documents I have access to.",
+                "answer": "I couldn't find any relevant information about your query in the documents I have access to.",
                 "usage": {},
                 "sources": []
             }
         
-        # Step 5: Hybrid search - rerank results based on keywords and metadata
-        processed_matches = []
-        for match in results.matches:
-            metadata = match.metadata
-            text_preview = metadata.get('text_preview', '')
-            doc_title = metadata.get('doc_title', '')
-            file_name = metadata.get('file_name', '')
-            chunk_keywords = metadata.get('keywords', [])
-            section = metadata.get('section', '')
-            match_namespace = metadata.get('namespace', namespace or 'unknown')
-            
-            # Base score from vector similarity
-            base_score = float(match.score)
-            
-            # Calculate keyword match score (0-1 range)
-            keyword_matches = sum(1 for kw in search_keywords if kw in text_preview.lower())
-            keyword_score = min(keyword_matches / max(1, len(search_keywords)), 1.0) * 0.3
-            
-            # Document title match bonus (0-0.3 range)
-            title_score = 0
-            if target_document and doc_title:
-                if target_document.lower() in doc_title.lower():
-                    title_score = 0.3
-                elif any(word in doc_title.lower() for word in target_document.lower().split()):
-                    title_score = 0.2
-            
-            # TOC relevance score for table of contents queries (0-0.4 range)
-            toc_score = 0
-            if toc_query:
-                if ("table of content" in text_preview.lower() or 
-                    "content" in section.lower() or
-                    any(kw in ["toc", "content", "chapter"] for kw in chunk_keywords)):
-                    toc_score = 0.4
-            
-            # Position bonus for early chunks in a document
-            position_score = 0
-            chunk_index = int(metadata.get('chunk_index', 0))
-            total_chunks = int(metadata.get('total_chunks', 1))
-            if chunk_index == 0:  # First chunk often has TOC or introduction
-                position_score = 0.2
-            elif chunk_index < total_chunks * 0.2:  # First 20% of chunks
-                position_score = 0.1
-            
-            # Combined score with weights
-            combined_score = base_score + keyword_score + title_score + toc_score + position_score
-            
-            logger.info(f"Namespace: {match_namespace}, Chunk {chunk_index}: Base: {base_score:.2f}, KW: {keyword_score:.2f}, "
-                       f"Title: {title_score:.2f}, TOC: {toc_score:.2f}, Pos: {position_score:.2f}, "
-                       f"Total: {combined_score:.2f}")
-            
-            processed_matches.append({
-                'match': match,
-                'combined_score': combined_score,
-                'keyword_score': keyword_score,
-                'toc_score': toc_score,
-                'preview': text_preview[:100],
-                'namespace': match_namespace
-            })
-        
-        # Sort by combined score and take top_k
-        processed_matches.sort(key=lambda x: x['combined_score'], reverse=True)
-        top_matches = [item['match'] for item in processed_matches[:top_k]]
-        
-        logger.info(f"Selected {len(top_matches)} top chunks after hybrid scoring")
-        
-        # Step 6: Retrieve full chunk content and prepare for the LLM
+        # Simplified chunk retrieval from JSON file specified by json_path parameter
         chunk_texts = []
         formatted_metadata = []
+        chunk_images = []  # List to collect images
         
-        for match in top_matches:
-            # Get chunk ID and JSON path from metadata
-            chunk_id = match.metadata.get('chunk_id')
-            json_path = match.metadata.get('full_text_path')
+        # Log the matches for debugging
+        logger.info(f"Retrieved {len(results.matches)} matches for query")
+        chunks_dir = Path("chunk_storage")
+        
+        # Use json_path if provided, otherwise construct the default path
+        if json_path:
+            json_file_path = Path(json_path)
+            logger.info(f"Using provided JSON path: {json_file_path}")
+        else:
+            json_file_path = chunks_dir / f"{index_name}_chunks.json"
+            logger.info(f"Using default JSON path: {json_file_path}")
+            
+        chunks_data = {}
+        if json_file_path.exists():
+            try:
+                with open(json_file_path, 'r', encoding='utf-8') as f:
+                    chunks_data = json.load(f)
+                logger.info(f"Loaded {len(chunks_data)} chunks from {json_file_path}")
+            except Exception as e:
+                logger.error(f"Error loading chunks from {json_file_path}: {str(e)}")
+                return {
+                    "answer": "I couldn't access the document content needed to answer your question.",
+                    "usage": {},
+                    "sources": []
+                }
+        else:
+            logger.error(f"Chunk file not found at: {json_file_path}")
+            return {
+            "answer": "I couldn't find the document content at the specified path.",
+            "usage": {},
+            "sources": []
+            }
+        
+        # Process each match
+        for i, match in enumerate(results.matches):
+            match_id = match.id
             match_namespace = match.metadata.get('namespace', namespace or 'unknown')
             
-            logger.info(f"Processing match from namespace '{match_namespace}': {match.id}")
-            logger.info(f"  Document: {match.metadata.get('doc_title', 'Unknown')}")
-            logger.info(f"  Section: {match.metadata.get('section', 'Unknown')}")
-            logger.info(f"  Preview: {match.metadata.get('text_preview', '')[:100]}")
+            logger.info(f"Processing match {i+1}: ID={match_id}, Score={match.score}")
             
-            # Retrieve full chunk content
-            if json_path and chunk_id:
-                # Extract index name from JSON path
-                index_name = os.path.basename(json_path).split('_chunks.json')[0]
+            # Get chunk text from the loaded JSON data
+            if match_id in chunks_data:
+                chunk_data = chunks_data[match_id]
+                chunk_text = chunk_data.get("text", "")
+                logger.info(f"Found chunk {match_id} in JSON file")
                 
-                # Load full chunk content from JSON
-                full_text = load_chunks_from_json(chunk_id, index_name)
-                if full_text:
-                    logger.info(f"Retrieved full content ({len(full_text)} chars)")
-                    chunk_texts.append(full_text)
-                else:
-                    # Fallback to preview if full text not available
-                    logger.warning(f"Could not retrieve full content, using preview")
-                    chunk_texts.append(match.metadata.get('text_preview', ''))
-            else:
-                # Use preview if chunk_id or json_path not available
-                chunk_texts.append(match.metadata.get('text_preview', ''))
+                # Check for images
+                if "images" in chunk_data and chunk_data["images"]:
+                    for img in chunk_data["images"]:
+                        chunk_images.append(img)
+                        logger.info(f"Found {len(chunk_data['images'])} images in chunk")
             
-            # Format metadata for LLM
-            formatted_metadata.append({
+            
+                # Add chunk text to the list
+                chunk_texts.append(chunk_text)
+                
+                # Format metadata for LLM
+                formatted_metadata.append({
                 "source": match.metadata.get('doc_title', match.metadata.get('file_name', 'Unknown')),
                 "section": match.metadata.get('section', 'General content'),
                 "similarity_score": float(match.score),
-                "preview": match.metadata.get('text_preview', '')[:100],
-                "chunking_strategy": match.metadata.get('chunking_strategy', 'unknown'),
-                "chunk_index": match.metadata.get('chunk_index', 0),
-                "total_chunks": match.metadata.get('total_chunks', 0),
-                "keywords": match.metadata.get('keywords', []),
-                "namespace": match_namespace
-            })
+                "namespace": match_namespace,
+                "has_image": match.metadata.get('has_image', False)
+                })
+            else:
+                # If chunk not found in the file, skip this match
+                    logger.warning(f"Chunk {match_id} not found in {json_file_path}, skipping")
+                    continue
         
-        # Step 7: Enhance the query with context awareness
-        enhanced_query = query
+        # Verify we have chunks to process
+        if not chunk_texts:
+            logger.error("No chunk texts could be retrieved. Query cannot proceed.")
+            return {
+            "answer": "I couldn't retrieve any document content for the current similarity metric.",
+            "usage": {},
+            "sources": []
+            }
+        # Log final counts
+        logger.info(f"Successfully retrieved {len(chunk_texts)} chunks")
+        logger.info(f"Found {len(chunk_images)} images to include in the response")
         
-        # Add document-specific context
-        if target_document:
-            enhanced_query = f"Based on the content about '{target_document}', please answer: {query}"
-        elif "document" in query.lower():
-            doc_names = set()
-            for match in top_matches:
-                doc_title = match.metadata.get('doc_title', 'Unknown')
-                if doc_title and doc_title != 'Unknown':
-                    doc_names.add(doc_title)
-            doc_context = ", ".join(doc_names) if doc_names else "the provided chunks"
-            enhanced_query = f"Based on the content from {doc_context}, please answer: {query}"
+        # Generate response using LiteLLM
+        from Backend.litellm_query_generator import generate_response
         
-        # Add TOC-specific instructions for table of contents queries
-        if toc_query:
-            enhanced_query = f"Please extract and format the table of contents or chapter list from the provided context. Query: {query}"
+        # Call with images if available
+        if chunk_images:
+            logger.info(f"Generating response with {len(chunk_texts)} chunks and {len(chunk_images)} images using {model_id}")
+            response = generate_response(
+                chunks=chunk_texts,
+                query=query,
+                model_id=model_id,
+                metadata=formatted_metadata,
+                images=chunk_images  # Pass the collected images
+            )
+        else:
+            logger.info(f"Generating response with {len(chunk_texts)} chunks using {model_id} (no images)")
+            response = generate_response(
+                chunks=chunk_texts,
+                query=query,
+                model_id=model_id,
+                metadata=formatted_metadata
+            )
         
-        logger.info(f"Enhanced query: {enhanced_query}")
-        
-        # Step 8: Generate response using LiteLLM with the specified model from MODEL_CONFIGS
-        logger.info(f"Generating response with {len(chunk_texts)} chunks using {model_id}")
-        
-        # Import the response generator dynamically to avoid circular imports
-        from Backend.litellm_query_generator import generate_response, MODEL_CONFIGS
-        
-        # Get model configuration
-        model_config = MODEL_CONFIGS.get(model_id, {})
-        logger.info(f"Using model config: {model_config}")
-        
-        response = generate_response(
-            chunks=chunk_texts,
-            query=enhanced_query,
-            model_id=model_id,
-            metadata=formatted_metadata
-        )
-        
-        # Step 9: Format the final response with enhanced source information
+        # Format sources for response
         sources_for_response = []
-        for i, match in enumerate(top_matches):
+        for i, match in enumerate(results.matches):
             metadata = match.metadata
             match_namespace = metadata.get('namespace', namespace or 'unknown')
+            
+            # Create preview from chunk text
+            preview = ""
+            if i < len(chunk_texts):
+                preview = chunk_texts[i][:150] + "..." if len(chunk_texts[i]) > 150 else chunk_texts[i]
+            
             sources_for_response.append({
                 "score": float(match.score),
                 "document": metadata.get('doc_title', 'Unknown'),
                 "file": metadata.get('file_name', 'Unknown'),
                 "section": metadata.get('section', 'Unknown'),
-                "preview": metadata.get('text_preview', '')[:150],
-                "chunk_index": metadata.get('chunk_index', 0),
-                "total_chunks": metadata.get('total_chunks', 0),
-                "namespace": match_namespace
+                "preview": preview,
+                "namespace": match_namespace,
+                "has_image": metadata.get('has_image', False)
             })
-        
+
         return {
             "answer": response["answer"],
             "usage": response["usage"],
             "sources": sources_for_response,
             "similarity_metric_used": similarity_metric,
             "model": response["model"],
-            "target_document": target_document,
-            "is_toc_query": toc_query,
-            "namespaces_searched": [namespace] if namespace else available_namespaces
+            "namespaces_searched": [namespace] if namespace else available_namespaces,
+            "images_included": len(chunk_images) > 0
         }
             
     except Exception as e:
         logger.error(f"Error in RAG query: {str(e)}")
         return {"error": str(e)}
-
-def view_vectors_by_namespace():
-    """View vectors in the Pinecone index organized by namespace"""
-    try:
-        # Get existing connections
-        client, _, index, index_name = get_existing_connections()
-        
-        if index is None:
-            logger.error("No Pinecone index exists. Please create embeddings first.")
-            return
-        
-        # Get stats with namespaces
-        stats = index.describe_index_stats()
-        namespaces = stats.namespaces
-        
-        if not namespaces:
-            print("No namespaces found in the index.")
-            return
-        
-        print(f"\nIndex '{index_name}' contains {stats.total_vector_count} total vectors")
-        print(f"Found {len(namespaces)} namespaces:")
-        
-        # List all namespaces and their vector counts
-        for ns_name, ns_data in namespaces.items():
-            print(f"\n📂 Namespace: {ns_name}")
-            print(f"   Vectors: {ns_data.vector_count}")
-            
-            # Get sample vectors from each namespace
-            results = index.query(
-                vector=[0] * 1536,  # Dummy vector
-                top_k=3,            # Just get 3 samples
-                include_metadata=True,
-                namespace=ns_name
-            )
-            
-            # Show samples
-            if results.matches:
-                print(f"   Sample vectors:")
-                for i, match in enumerate(results.matches, 1):
-                    print(f"     {i}. ID: {match.id}")
-                    print(f"        Document: {match.metadata.get('doc_title', 'Unknown')}")
-                    print(f"        Section: {match.metadata.get('section', 'Unknown')}")
-                    print(f"        Preview: {match.metadata.get('text_preview', '')[:80]}...")
-            else:
-                print("   No vectors found in this namespace.")
-                
-    except Exception as e:
-        print(f"Error viewing vectors by namespace: {str(e)}")
-
-# You can add this to the __main__ section:
-# view_vectors_by_namespace()    
-
+    
+    
 def serialize_index_stats(stats):
     """Convert Pinecone index stats to JSON serializable format"""
     return {
@@ -1320,36 +1082,37 @@ def serialize_namespace_summary(namespace_summary):
         'vector_count': namespace_summary.vector_count
     }
 
-def view_first_10_vectors():
-    """View the first 10 vectors in the Pinecone index"""
-    try:
-        # Get existing connections
-        client, _, index, index_name = get_existing_connections()
+# def view_first_10_vectors():
+#     """View the first 10 vectors in the Pinecone index"""
+#     try:
+#         # Get existing connections
+#         client, _, index, index_name = get_or_create_connections()
         
-        if index is None:
-            logger.error("No Pinecone index exists. Please create embeddings first.")
-            return
+#         if index is None:
+#             logger.error("No Pinecone index exists. Please create embeddings first.")
+#             return
         
-        # Query to get first 10 vectors
-        results = index.query(
-            vector=[0] * 1536,  # Dummy vector
-            top_k=10,
-            include_metadata=True
-        )
+#         # Query to get first 10 vectors
+#         results = index.query(
+#             vector=[0] * 1536,  # Dummy vector
+#             top_k=10,
+#             include_metadata=True
+#         )
         
-        # Get the first 10 items
-        first_10 = results.matches
+#         # Get the first 10 items
+#         first_10 = results.matches
         
-        print("\nFirst 10 vectors in the index:")
-        for i, match in enumerate(first_10, 1):
-            print(f"\n{i}. Vector ID: {match.id}")
-            print(f"   File: {match.metadata.get('file_name', 'Unknown')}")
-            print(f"   Preview: {match.metadata['text_preview'][:100]}...")
+#         print("\nFirst 10 vectors in the index:")
+#         for i, match in enumerate(first_10, 1):
+#             print(f"\n{i}. Vector ID: {match.id}")
+#             print(f"   File: {match.metadata.get('file_name', 'Unknown')}")
+#             print(f"   Preview: {match.metadata['text_preview'][:100]}...")
             
-    except Exception as e:
-        print(f"Error fetching vectors: {str(e)}")
+#     except Exception as e:
+#         print(f"Error fetching vectors: {str(e)}")
 
 # Update the main execution section
+
 if __name__ == "__main__":
     # Configure logging
     logging.basicConfig(level=logging.INFO, 
@@ -1357,8 +1120,29 @@ if __name__ == "__main__":
     logger = logging.getLogger("rag_pipeline")
     
     def test_pipeline():
-                # Add this in the test_pipeline function
+        # Add this in the test_pipeline function
         print("\n" + "="*80)
+        print("RAG PIPELINE TESTING".center(80))
+        print("="*80 + "\n")
+
+        # Add index selection first
+        print("Select index to use:")
+        print("1. Cosine similarity (embedding-cosine)")
+        print("2. Euclidean distance (embedding-euclidean)")
+        print("3. Dot product (embedding-dot)")
+        
+        index_choice = input("\nSelect index (1-3, or press Enter for default cosine): ").strip()
+        
+        # Set similarity metric based on choice
+        if index_choice == "2":
+            similarity_metric = "euclidean"
+        elif index_choice == "3":
+            similarity_metric = "dot"
+        else:
+            similarity_metric = "cosine"  # Default
+        
+        print(f"Using index with {similarity_metric} similarity metric\n")
+        
         print("NAMESPACE MANAGEMENT".center(80))
         print("="*80 + "\n")
 
@@ -1370,7 +1154,8 @@ if __name__ == "__main__":
         ns_choice = input("\nSelect namespace operation (or press Enter to skip): ").strip()
 
         if ns_choice == "1":
-            view_vectors_by_namespace()
+            pass
+            # view_vectors_by_namespace()
         elif ns_choice == "2":
             # Get namespace name
             namespace = input("Enter namespace name: ").strip()
@@ -1398,13 +1183,14 @@ if __name__ == "__main__":
             # Extract file name from path
             file_name = os.path.basename(doc_path)
             
-            # Load data to Pinecone with specified namespace
-            print(f"\nLoading {file_name} to namespace '{namespace}'...")
+            # Load data to Pinecone with specified namespace and similarity metric
+            print(f"\nLoading {file_name} to namespace '{namespace}' with {similarity_metric} similarity...")
             result = load_data_to_pinecone(
                 markdown_content, 
                 "recursive_chunking", 
                 file_name=os.path.splitext(file_name)[0],
-                namespace=namespace
+                namespace=namespace,
+                similarity_metric=similarity_metric
             )
             
             if result["status"] == "success":
@@ -1424,19 +1210,18 @@ if __name__ == "__main__":
                 user_query = "What is this document about?"
             
             # Get model
-            model = input("Select model (gemini, gpt-3.5-turbo, gpt-4o, or press Enter for default): ").strip()
+            model = input("Select model (gemini, gpt-3.5-turbo, claude, or press Enter for default): ").strip()
             if not model:
                 model = "gpt-3.5-turbo"
             
-            # Search with namespace
-            print(f"\nSearching {'namespace ' + namespace if namespace else 'all namespaces'} for: '{user_query}'")
+            # Search with namespace and selected similarity metric
+            print(f"\nSearching {'namespace ' + namespace if namespace else 'all namespaces'} with {similarity_metric} index for: '{user_query}'")
             response = query_pinecone_rag(
                 query=user_query,
                 model_id=model,
-                similarity_metric="cosine",
+                similarity_metric=similarity_metric,
                 top_k=5,
-                namespace=namespace,
-                search_all_namespaces=not namespace
+                namespace=namespace
             )
             
             print("\n" + "-"*80)

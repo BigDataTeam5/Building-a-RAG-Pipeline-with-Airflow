@@ -13,11 +13,13 @@ update:
 
 	
 backend:
-	poetry run uvicorn backend.api:app --host 0.0.0.0 --port 8000
+	poetry run uvicorn Backend.api:app --host 0.0.0.0 --port 8000 --reload
 frontend:
-	poetry run streamlit run .\frontend\app.py --server.port 8501
+	poetry run streamlit run .\Frontend\app.py --server.port 8501
 pinecone:
 	poetry run python .\Rag_modelings\rag_pinecone.py
+pinecone-test:
+	poetry run python .\Rag_modelings\Chunking_Stats\pinecone\pinecone_.py
 
 chromadb:
 	poetry run python .\Rag_modelings\rag_chromadb.py

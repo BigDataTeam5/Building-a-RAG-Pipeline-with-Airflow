@@ -100,7 +100,7 @@ def create_llm_response_from_chunks(
     chunks: List[str],
     metadata: Optional[List[Dict[str, Any]]] = None,
     query: str = "",
-    model_id: str = "gpt4o"
+    model_id: str = "gpt-3.5-turbo"
 ) -> Dict[str, Any]:
     """
     Generate a Q&A response from text chunks using the specified model.
@@ -132,7 +132,7 @@ def create_llm_response_from_chunks(
         
         if model_id == "gemini" and litellm.gemini_key:
             api_key_status = True
-        elif model_id == "gpt4o" and litellm.openai_api_key:
+        elif model_id == "gpt-3.5-turbo" and litellm.openai_api_key:
             api_key_status = True
         elif model_id == "claude" and litellm.anthropic_api_key: 
             api_key_status = True
@@ -156,11 +156,23 @@ def create_llm_response_from_chunks(
             else:
                 context += f"\n## Chunk {i+1}:\n\n{chunk}\n\n"
         
-        # Prepare the Q&A prompt
-        prompt_text = f"{query}"
+        # Create system message with instructions
+        system_message = f"""You are a helpful AI assistant that answers questions based on the provided content.
         
-        # Prepare the messages
-        messages = [{"role": "user", "content": prompt_text}]
+Use the following context to answer the user's question:
+
+{context}
+
+When answering:
+1. Only use information from the provided context
+2. If the information isn't in the context, say "I don't have enough information to answer this question"
+3. Be concise and focused in your response"""
+        
+        # Prepare the messages with both system and user content
+        messages = [
+            {"role": "system", "content": system_message},
+            {"role": "user", "content": query}
+        ]
         
         # Call model using LiteLLM with specific configurations per model
         if model_id == "claude":
@@ -195,12 +207,12 @@ def create_llm_response_from_chunks(
                 max_tokens=model_config["max_output_tokens"],
                 api_key=litellm.xai_api_key
             )
-        else:  # Default to GPT-4o
+        else:  # Default to GPT-3.5-turbo
             response = litellm.completion(
-                model="openai/gpt-4o",
+                model=model_config["model"],
                 messages=messages,
                 temperature=0.3,
-                max_tokens=4096,
+                max_tokens=model_config["max_output_tokens"],
                 api_key=litellm.openai_api_key
             )
         
@@ -228,13 +240,14 @@ def create_llm_response_from_chunks(
             "content": f"Error generating response: {str(e)}",
             "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
         }
-
+    
 def generate_response(
     chunks: List[str],
     query: str,
-    model_id: str = "gpt4o",
+    model_id: str = "gpt-3.5-turbo",
     metadata: Optional[List[Dict[str, Any]]] = None,
-    output_file: Optional[str] = None
+    output_file: Optional[str] = None,
+    images: Optional[List[Dict[str, Any]]] = None
 ) -> Dict[str, Any]:
     """
     Generate a response to a query based on the provided chunks.
@@ -245,6 +258,7 @@ def generate_response(
         model_id: ID of the model to use
         metadata: Optional metadata for the chunks
         output_file: Optional path to save the response
+        images: Optional list of base64 encoded images from the chunks
         
     Returns:
         Dictionary with the generated answer and token usage information
@@ -252,14 +266,34 @@ def generate_response(
     print(f"Generating response using {MODEL_CONFIGS[model_id]['name']}")
     print(f"Query: {query}")
     print(f"Number of chunks: {len(chunks)}")
+    if images:
+        print(f"Number of images: {len(images)}")
     
-    # Generate the answer
-    response = create_llm_response_from_chunks(
-        chunks=chunks,
-        metadata=metadata,
-        query=query,
-        model_id=model_id
-    )
+    # Check if we should use a multimodal model with images
+    has_images = images and len(images) > 0
+    can_process_images = model_id in ["gemini", "claude", "gpt-4o"]
+    
+    if has_images and not can_process_images:
+        print(f"Warning: Images found but model {model_id} cannot process images. Consider using gemini, claude, or gpt-4o")
+    
+    # For models that support images (like Gemini, Claude, GPT-4o)
+    if has_images and can_process_images:
+        # Generate response with images using multimodal capabilities
+        response = create_llm_response_from_chunks(
+            chunks=chunks,
+            metadata=metadata,
+            query=query,
+            model_id=model_id,
+            images=images
+        )
+    else:
+        # Standard text-only response
+        response = create_llm_response_from_chunks(
+            chunks=chunks,
+            metadata=metadata,
+            query=query,
+            model_id=model_id
+        )
     
     answer = response["content"]
     usage = response["usage"]
@@ -286,6 +320,9 @@ def generate_response(
         "model": model_id
     }
 
+
+
+
 if __name__ == "__main__":
     # Test with some example chunks
     test_chunks = [
@@ -302,12 +339,12 @@ if __name__ == "__main__":
     
     test_query = "How much did the data center segment contribute to NVIDIA's revenue in Q1 2023?"
     
-    # Test with default model (gpt4o)
+    # Test with default model (gpt-3.5-turbo)
     response = generate_response(
         chunks=test_chunks,
         query=test_query,
         metadata=test_metadata,
-        model_id="gpt4o"
+        model_id="gpt-3.5-turbo"
     )
     
     print("\nResponse Preview:")

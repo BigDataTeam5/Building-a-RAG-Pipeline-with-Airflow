@@ -23,8 +23,6 @@ from dotenv import load_dotenv
 
 # Load environment variables
 load_dotenv()
-
-# Import our custom visualization helper
 from chunk_visualizer import (
     visualize_chunks_html, 
     analyze_chunks_stats, 

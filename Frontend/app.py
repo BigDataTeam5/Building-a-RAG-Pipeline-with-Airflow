@@ -35,6 +35,8 @@ if "chunking_strategy" not in st.session_state:
     st.session_state.chunking_strategy = None
 if "selected_quarters" not in st.session_state:
     st.session_state.selected_quarters = []
+if "namespace" not in st.session_state:
+    st.session_state.namespace = None
 
 # FastAPI Base URL - Simple configuration
 if "fastapi_url" not in st.session_state:
@@ -46,23 +48,20 @@ if "fastapi_url" not in st.session_state:
 if "api_connected" not in st.session_state:
     st.session_state.api_connected = True
 
-# Define function to update API endpoints based on the configured URL
+
 def update_api_endpoints():
     base_url = st.session_state.fastapi_url
     
-    # API Endpoints
-    st.session_state.UPLOAD_PDF_API = f"{base_url}/upload-pdf"
-    st.session_state.PARSE_PDF_API = f"{base_url}/parse-pdf"
-    st.session_state.RAG_EMBEDDING_API = f"{base_url}/rag/create-embeddings"
-    st.session_state.ASK_QUESTION_API = f"{base_url}/ask-question"
-    st.session_state.GET_LLM_RESULT_API = f"{base_url}/get-llm-result"
+    # API Endpoints - updated to match new router structure
+    st.session_state.UPLOAD_PDF_PARSE_API = f"{base_url}/documents/upload-and-parse"  
+    st.session_state.RAG_EMBED_API = f"{base_url}/rag/create-embeddings"
+    st.session_state.RAG_MANUAL_EMBED_API = f"{base_url}/rag/manual-embedding"
     st.session_state.LLM_MODELS_API = f"{base_url}/llm/models"
-    
-    # RAG-specific endpoints
     st.session_state.NVIDIA_QUARTERS_API = f"{base_url}/nvidia/quarters"
     st.session_state.RAG_QUERY_API = f"{base_url}/rag/query"
     st.session_state.RAG_CONFIG_API = f"{base_url}/rag/config"
-
+    st.session_state.RAG_JOB_STATUS_API = f"{base_url}/status/job"
+    st.session_state.RAG_QUERY_STATUS_API = f"{base_url}/status/query"
 
 # Initial setup of API endpoints
 update_api_endpoints()
@@ -76,7 +75,7 @@ def upload_pdf(file):
             params = {
                 "parser": st.session_state.pdf_parser
             }
-            response = requests.post(st.session_state.UPLOAD_PDF_API, files=files, params=params)
+            response = requests.post(st.session_state.UPLOAD_PDF_PARSE_API, files=files, params=params)
 
         if response.status_code == 200:
             st.session_state.file_uploaded = True
@@ -105,100 +104,64 @@ def fetch_nvidia_quarters():
         st.warning(f"Error fetching quarters: {str(e)}")
         return []
 
-# Function to sanitize index name for Pinecone - Enhanced version
-def sanitize_index_name(name):
-    """
-    Sanitize index name to match Pinecone requirements:
-    - Lowercase alphanumeric characters or hyphens only
-    - Replace spaces and invalid characters with hyphens
-    - Make sure it's a valid name
-    - Ensure the name is within allowed length
-    """
-    if not name or not isinstance(name, str):
-        return "default-index"
-    
-    # Convert to lowercase
-    sanitized = name.lower()
-    
-    # Replace all non-alphanumeric characters (except hyphens) with hyphens
-    sanitized = re.sub(r'[^a-z0-9-]', '-', sanitized)
-    
-    # Replace multiple consecutive hyphens with a single hyphen
-    sanitized = re.sub(r'-+', '-', sanitized)
-    
-    # Remove leading and trailing hyphens
-    sanitized = sanitized.strip('-')
-    
-    # Ensure we have a valid name - if empty or only contained invalid chars
-    if not sanitized or not re.match(r'^[a-z0-9]', sanitized):
-        sanitized = "default-index"
-    
-    # Limit to reasonable length (Pinecone may have a limit)
-    max_length = 45  # An assumed safe maximum
-    if len(sanitized) > max_length:
-        sanitized = sanitized[:max_length]
-        # Ensure we don't end with a hyphen
-        sanitized = sanitized.rstrip('-')
-    
-    return sanitized
-
-# Function to Submit RAG Query
-def submit_rag_query(question, model, quarters=None):
+def submit_rag_query(question, model, quarters=None, json_path=None):
     try:
-        with st.spinner("⏳ Processing your question with RAG pipeline... This may take a moment."):
-            # Prepare the request payload
+        # Prepare the payload based on RAG method
+        if st.session_state.rag_method == "Pinecone":
             payload = {
-                # REQUIRED fields by FastAPI:
                 "query": question,
-                "rag_method": st.session_state.rag_method,
+                "rag_method": "pinecone",
                 "model_id": model,
-                
-                # OPTIONAL fields:
-                "data_source": st.session_state.data_source,
-                "quarters": quarters,
-                "similarity_metric": st.session_state.similarity_metric
+                "similarity_metric": st.session_state.similarity_metric,
+                "namespace": st.session_state.get("namespace"),
+                "json_path": json_path
             }
+        elif st.session_state.rag_method.lower() == "chromadb" and quarters:
+            payload = {
+                "query": question,
+                "rag_method": "chromadb",
+                "model_id": model,
+                "data_source": st.session_state.data_source,
+                "quarters": quarters
+            }
+        elif st.session_state.rag_method.lower() == "manual_embedding":
+            payload = {
+                "query": question,
+                "rag_method": "manual_embedding",
+                "model_id": model,
+                "embedding_id": "direct_query"
+            }
+        else:
+            payload = {
+                "query": question,
+                "rag_method": st.session_state.rag_method.lower(),
+                "model_id": model,
+                "data_source": st.session_state.data_source
+            }
+        
+        # Submit the query to the API
+        response = requests.post(
+            st.session_state.RAG_QUERY_API,
+            json=payload
+        )
+        
+        if response.status_code == 200:
+            result = response.json()
             
-            # Special handling for manual_embedding
-            if st.session_state.rag_method == "manual_embedding":
-                payload["embedding_id"] = "direct_query"
-            
-            # Special handling for Pinecone
-            if st.session_state.rag_method == "Pinecone":
-                # Create a sanitized index name based on data source or file name
-                index_base = "pinecone"  # Start with a simple prefix
-                
-                # Add data source info if available
-                if st.session_state.data_source:
-                    index_base += "-" + st.session_state.data_source.replace(" ", "")
-                
-                # Add quarter info if available (limited to first quarter to avoid long names)
-                if quarters and len(quarters) > 0:
-                    index_base += "-" + quarters[0]
-                
-                # Sanitize the index name
-                index_name = sanitize_index_name(index_base)
-                
-                # Add debugging info visible in the UI
-                st.info(f"Using Pinecone index name: '{index_name}'")
-                
-                payload["index_name"] = index_name
-            
-            # Now post as JSON
-            response = requests.post(
-                st.session_state.RAG_QUERY_API,
-                json=payload
-            )
-
-            if response.status_code == 200:
-                return response.json()
+            # If we have a query_job_id, poll for the result
+            if "query_job_id" in result:
+                st.info("Query is being processed in the background. Please wait...")
+                final_result = poll_for_query_status(result["query_job_id"])
+                return final_result
             else:
-                st.error(f"Failed to submit query: {response.text}")
-                return None
+                # For backward compatibility with direct responses
+                return result
+        else:
+            st.error(f"Failed to submit query: {response.text}")
+            return None
     except Exception as e:
         st.error(f"Error in query processing: {str(e)}")
         return None
-
 
 # Function to fetch available LLM models from API
 def fetch_available_models():
@@ -210,68 +173,94 @@ def fetch_available_models():
             return models
         else:
             st.warning(f"Could not fetch available models: {response.status_code}")
-            return ["gpt-4"]  # Default fallback model
+            return ["gpt-3.5-turbo"]  # Default fallback model
     except Exception as e:
         st.warning(f"Error fetching models: {str(e)}")
-        return ["gpt-4"]  # Default fallback model
+        return ["gpt-3.5-turbo"]  # Default fallback model
 
-# Improved polling function with progress bar and timeout
-def poll_for_llm_result(job_id, max_retries=15, interval=2):
-    """Poll for LLM result with a progress bar and better timeout handling"""
-    retries = 0
+
+def poll_for_query_status(query_job_id, interval=1):
+    """Poll for RAG query job status with dynamic progress indicators"""
     
     # Create a progress bar
-    progress_text = "Waiting for LLM to process your request..."
     progress_bar = st.progress(0)
+    status_msg = st.empty()
+    start_time = time.time()
+    cycle_duration = 60  # Reset progress visual every 60 seconds
     
-    while retries < max_retries:
-        try:
-            # Calculate progress percentage
-            progress = min(retries / max_retries, 0.95)  # Cap at 95% until complete
-            progress_bar.progress(progress)
-            
-            # Check result status
-            response = requests.get(
-                f"{st.session_state.GET_LLM_RESULT_API}/{job_id}",
-                timeout=10
-            )
-            
-            if response.status_code == 200:
-                result_data = response.json()
-                status = result_data.get("status")
+    # Use a spinner for additional visual cue
+    with st.spinner("Processing your question with RAG pipeline..."):
+        while True:
+            try:
+                # Calculate elapsed time
+                elapsed_time = time.time() - start_time
                 
-                if status == "completed":
-                    progress_bar.progress(1.0)  # Complete the progress bar
-                    time.sleep(0.5)  # Brief pause to show completed progress
-                    progress_bar.empty()  # Remove the progress bar
-                    return result_data
+                # Create a cycle for the progress indicator
+                cycle_progress = (elapsed_time % cycle_duration) / cycle_duration
+                
+                # Update progress bar
+                progress_bar.progress(min(cycle_progress, 0.97))
+                
+                # Update status message with more detailed information
+                elapsed_mins = int(elapsed_time // 60)
+                elapsed_secs = int(elapsed_time % 60)
+                
+                # Dynamic status messages
+                phase = int(elapsed_time % 12)
+                if phase < 3:
+                    status_text = "Retrieving relevant chunks..."
+                elif phase < 6:
+                    status_text = "Processing query with LLM..."
+                elif phase < 9:
+                    status_text = "Generating comprehensive response..."
+                else:
+                    status_text = "Finalizing answer..."
+                
+                status_msg.text(f"⏳ {status_text} (Elapsed: {elapsed_mins}m {elapsed_secs}s)")
+                
+                query_status_url = f"{st.session_state.RAG_QUERY_STATUS_API}/{query_job_id}"
+                response = requests.get(
+                    query_status_url,
+                    timeout=30
+                )
+                
+                if response.status_code == 200:
+                    result_data = response.json()
+                    status = result_data.get("status")
                     
-                elif status == "failed":
-                    progress_bar.empty()
-                    st.error(f"LLM processing failed: {result_data.get('error', 'Unknown error')}")
-                    return None
-                    
-            retries += 1
-            time.sleep(interval)
-            
-        except Exception as e:
-            progress_bar.empty()
-            st.error(f"Error while polling for result: {str(e)}")
-            return None
-    
-    # If we get here, we've exceeded max retries
-    progress_bar.empty()
-    st.error(f"Timed out waiting for LLM response after {max_retries * interval} seconds.")
-    return None
-# Add this toke usage calculation function
+                    if status == "completed":
+                        progress_bar.progress(1.0)
+                        status_msg.text("✅ Response generated successfully!")
+                        time.sleep(0.5)
+                        progress_bar.empty()
+                        status_msg.empty()
+                        return result_data
+                        
+                    elif status == "failed":
+                        progress_bar.empty()
+                        status_msg.empty()
+                        st.error(f"Query processing failed: {result_data.get('error', 'Unknown error')}")
+                        return None
+                
+                # Sleep before next check
+                time.sleep(interval)
+                
+            except Exception as e:
+                progress_bar.empty()
+                status_msg.empty()
+                st.error(f"Error polling for query status: {str(e)}")
+                return None
+
+# Add this token usage calculation function
 def calculate_token_cost(model_id, usage_data):
     """Calculate cost based on model and token usage"""
     # Default rates (can be adjusted based on actual pricing)
     rates = {
-        "gpt-4": {"input": 0.00003, "output": 0.00006},
         "gpt-3.5-turbo": {"input": 0.0000015, "output": 0.000002},
-        "claude-3": {"input": 0.000025, "output": 0.000075},
-        "gemini-pro": {"input": 0.000001, "output": 0.000002},
+        "gemini": {"input": 0.000001, "output": 0.000002},
+        "deepseek": {"input": 0.000003, "output": 0.000005},
+        "claude": {"input": 0.000025, "output": 0.000075},
+        "grok": {"input": 0.000004, "output": 0.000006},
         "default": {"input": 0.000002, "output": 0.000004}
     }
     
@@ -293,94 +282,214 @@ def calculate_token_cost(model_id, usage_data):
 if "available_models" not in st.session_state:
     st.session_state.available_models = fetch_available_models()
 # Function to process RAG embeddings
-def process_rag_embeddings(file_id, markdown_path, rag_method, chunking_strategy):
+def process_rag_embeddings(file_id, markdown_path, markdown_filename, rag_method, chunking_strategy,similarity_metric):
     try:
-        with st.spinner("⏳ Creating embeddings... This may take a moment."):
-            print("Creating embeddings with RAG pipeline...", markdown_path, rag_method, chunking_strategy)
-            # Prepare the request payload as JSON body (not query params)
+        # Prepare the request payload
+        if rag_method.lower() == "pinecone":
+            namespace = markdown_filename.lower().replace(" ", "-").replace(".", "-")
+            # Store the namespace in session state for future queries
+            st.session_state.namespace = namespace
             payload = {
-                "markdown_path": markdown_path,
-                "rag_method": rag_method,
-                "chunking_strategy": chunking_strategy,
-                "embedding_model": "text-embedding-ada-002"
-            }
-            
-            # Submit to API with JSON body instead of query params
-            response = requests.post(
-                st.session_state.RAG_EMBEDDING_API, 
-                json=payload  # Changed from params to json
-            )
-            
-            if response.status_code == 200:
-                return response.json()
-            else:
-                st.error(f"Failed to create embeddings: {response.text}")
-                return {"error": response.text}
+            "file_id": file_id,
+            "markdown_path": markdown_path,
+            "markdown_filename": markdown_filename,
+            "rag_method": rag_method,
+            "chunking_strategy": chunking_strategy,
+            "similarity_metric": similarity_metric,
+            "namespace": namespace
+        }
+        else:
+            payload = {
+            "file_id": file_id,
+            "markdown_path": markdown_path,
+            "markdown_filename": markdown_filename,
+            "rag_method": rag_method,
+            "chunking_strategy": chunking_strategy,
+            "similarity_metric": similarity_metric
+        }       
+        st.session_state.markdown_filename = markdown_filename
+        
+        # Make the API request
+        response = requests.post(
+            st.session_state.RAG_EMBED_API,
+            json=payload
+        )
+        
+        # Check if the request was successful
+        if response.status_code == 200:
+            result = response.json()
+            return result
+        else:
+            st.error(f"Failed to process embeddings: {response.text}")
+            return {"error": response.text}
     except Exception as e:
-        st.error(f"Error in embedding creation: {str(e)}")
+        st.error(f"Error processing embeddings: {str(e)}")
         return {"error": str(e)}
-
-# Add this new function after the process_rag_embeddings function
-def poll_for_embedding_status(job_id, max_retries=30, interval=2):
-    """Poll for embedding job status with progress bar and timeout handling"""
-    retries = 0
+        
+def poll_for_embedding_status(job_id, interval=2):
+    """Poll for embedding job status with indefinite waiting and dynamic progress indicators"""
     
     # Create a progress bar
-    progress_text = "Creating embeddings and storing vectors in database..."
     progress_bar = st.progress(0)
-    status_text = st.empty()
+    status_msg = st.empty()
+    error_msg = st.empty()  # Add an error message placeholder
+    start_time = time.time()
+    cycle_duration = 90  # Reset progress visual every 90 seconds for continued engagement
     
-    while retries < max_retries:
-        try:
-            # Calculate progress percentage (cap at 95% until complete)
-            progress = min(retries / max_retries, 0.95)
-            progress_bar.progress(progress)
-            
-            # Update status message
-            if retries < max_retries * 0.3:
-                status_text.text("⏳ Processing document chunks...")
-            elif retries < max_retries * 0.6:
-                status_text.text("⏳ Creating vector embeddings...")
-            else:
-                status_text.text("⏳ Storing vectors in database...")
-            
-            # Check job status
-            response = requests.get(
-                f"{st.session_state.RAG_EMBEDDING_API}/status/{job_id}",
-                timeout=10
-            )
-            
-            if response.status_code == 200:
-                result_data = response.json()
-                status = result_data.get("status")
+    # Track consecutive errors to prevent infinite polling on terminal failures
+    consecutive_errors = 0
+    max_consecutive_errors = 10
+    
+    # Use a spinner for additional visual cue
+    with st.spinner("Creating embeddings and storing vectors in database..."):
+        while True:
+            try:
+                # Calculate elapsed time
+                elapsed_time = time.time() - start_time
                 
-                if status == "completed":
-                    progress_bar.progress(1.0)  # Complete the progress bar
-                    status_text.text("✅ Embeddings created successfully!")
-                    time.sleep(0.5)  # Brief pause to show completed progress
-                    return result_data
+                # Create a cycle for the progress indicator (resets periodically)
+                cycle_progress = (elapsed_time % cycle_duration) / cycle_duration
+                
+                # Update progress bar
+                progress_bar.progress(min(cycle_progress, 0.97))  # Cap at 97% until complete
+                
+                # Update status message with more detailed information
+                elapsed_mins = int(elapsed_time // 60)
+                elapsed_secs = int(elapsed_time % 60)
+                
+                # Dynamic status messages based on RAG method and elapsed time
+                if st.session_state.rag_method == "Pinecone":
+                    phase = elapsed_time % 9  # Cycle through 3 phases every 9 seconds
+                    if phase < 3:
+                        status_text = "Processing document chunks..."
+                    elif phase < 6:
+                        status_text = "Creating vector embeddings..."
+                    else:
+                        status_text = "Loading vectors to Pinecone..."
+                elif st.session_state.rag_method == "ChromaDB":
+                    phase = elapsed_time % 9
+                    if phase < 3:
+                        status_text = "Processing document chunks..."
+                    elif phase < 6:
+                        status_text = "Creating vector embeddings..."
+                    else:
+                        status_text = "Loading embeddings to ChromaDB..."
+                elif st.session_state.rag_method == "manual_embedding":
+                    phase = elapsed_time % 6
+                    if phase < 3:
+                        status_text = "Processing document chunks..."
+                    else:
+                        status_text = "Creating manual embeddings in memory..."
+                else:
+                    phase = elapsed_time % 9
+                    if phase < 3:
+                        status_text = "Processing document chunks..."
+                    elif phase < 6:
+                        status_text = "Creating vector embeddings..."
+                    else:
+                        status_text = "Storing vectors in database..."
+                
+                status_msg.text(f"⏳ {status_text} (Elapsed: {elapsed_mins}m {elapsed_secs}s)")
+                
+                
+                job_status_url = f"{st.session_state.RAG_JOB_STATUS_API}/{job_id}"
+                
+                # Increase timeout and implement retries
+                max_retries = 3
+                retry_count = 0
+                response = None
+                
+                while retry_count < max_retries:
+                    try:
+                        response = requests.get(
+                            job_status_url,
+                            timeout=60  # Increased timeout for the request
+                        )
+                        # Reset consecutive errors counter on successful connection
+                        consecutive_errors = 0
+                        break  # Exit retry loop if successful
+                    except requests.exceptions.Timeout:
+                        retry_count += 1
+                        if retry_count < max_retries:
+                            # Log timeout and retry
+                            status_msg.text(f"⏳ Connection timeout, retrying... (Attempt {retry_count}/{max_retries})")
+                            time.sleep(2)  # Wait before retry
+                        else:
+                            # If we reach max retries but the process is still running
+                            status_msg.text(f"⏳ Operation taking longer than expected, but still running... (Elapsed: {elapsed_mins}m {elapsed_secs}s)")
+                            consecutive_errors += 1
+                    except Exception as e:
+                        # For other exceptions, try again but don't fail completely
+                        retry_count += 1
+                        if retry_count < max_retries:
+                            status_msg.text(f"⏳ Connection error, retrying... (Attempt {retry_count}/{max_retries})")
+                            time.sleep(2)
+                        else:
+                            consecutive_errors += 1
+                
+                # If we've hit too many consecutive errors, provide a way to continue
+                if consecutive_errors >= max_consecutive_errors:
+                    error_msg.error("Multiple connection errors. The server may be unreachable or the operation may have failed.")
                     
-                elif status == "failed":
-                    progress_bar.empty()
-                    status_text.empty()
-                    st.error(f"Embedding creation failed: {result_data.get('error', 'Unknown error')}")
-                    return None
-            
-            retries += 1
-            time.sleep(interval)
-            
-        except Exception as e:
-            progress_bar.empty()
-            status_text.empty()
-            st.error(f"Error while polling for embedding status: {str(e)}")
-            return None
-    
-    # If we get here, we've exceeded max retries
-    progress_bar.empty()
-    status_text.empty()
-    st.error(f"Timed out waiting for embeddings after {max_retries * interval} seconds.")
-    return None
-
+                    # Give user option to continue trying or abort
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        if st.button("Continue Trying"):
+                            consecutive_errors = 0
+                            error_msg.empty()
+                    with col2:
+                        if st.button("Abort"):
+                            progress_bar.empty()
+                            status_msg.empty()
+                            error_msg.empty()
+                            return {"status": "aborted", "error": "User aborted after multiple connection errors"}
+                
+                # If we have a response, process it
+                if response and response.status_code == 200:
+                    result_data = response.json()
+                    status = result_data.get("status")
+                    
+                    if status == "completed":
+                        progress_bar.progress(1.0)  
+                        
+                        # Success message based on RAG method
+                        if st.session_state.rag_method == "Pinecone":
+                            status_msg.text("✅ Embeddings successfully loaded to Pinecone!")
+                            if "json_path" in result_data:
+                                st.session_state.namespace = result_data.get("json_path")
+                            if "namespace" in result_data:
+                                st.session_state.namespace = result_data.get("namespace")
+                            if "json_path" in result_data:
+                                st.session_state.json_path = result_data.get("json_path")
+                        elif st.session_state.rag_method == "ChromaDB":
+                            status_msg.text("✅ Embeddings successfully loaded to ChromaDB!")
+                        elif st.session_state.rag_method == "manual_embedding":
+                            status_msg.text("✅ Manual embeddings created successfully in memory!")
+                        else:
+                            status_msg.text("✅ Embeddings created successfully!")
+                            
+                        time.sleep(0.5)  # Brief pause to show completed progress
+                        progress_bar.empty()  # Remove the progress bar
+                        status_msg.empty()  # Remove the status message
+                        error_msg.empty()   # Remove error message if any
+                        return result_data
+                        
+                    elif status == "failed":
+                        progress_bar.empty()
+                        status_msg.empty()
+                        error_msg.empty()
+                        st.error(f"Embedding creation failed: {result_data.get('error', 'Unknown error')}")
+                        return None
+                
+                # Sleep before next check
+                time.sleep(interval)
+                
+            except Exception as e:
+                # Log error but don't immediately fail
+                status_msg.text(f"⚠️ Error checking status: {str(e)}. Will retry... (Elapsed: {elapsed_mins}m {elapsed_secs}s)")
+                consecutive_errors += 1
+                time.sleep(interval * 2)  # Wait longer before retrying
+                continue  # Continue polling instead of stopping with an error
 # Sidebar UI
 with st.sidebar:
     st.title("RAG Pipeline Configuration")
@@ -391,9 +500,19 @@ with st.sidebar:
         ["Select an option", "PDF Upload", "Nvidia Dataset"],
         index=0
     )
+    similarity_metric = st.selectbox(
+            "Select Similarity Metric:",
+            [   "Select a metric",
+                "cosine",
+                "euclidean",
+                "dot-product" 
+            ],
+            help="Choose how similarity between text chunks will be calculated"
+        )
     
     # Only show these options for PDF Upload
-    if data_source == "PDF Upload":
+    if data_source == "PDF Upload" and similarity_metric!="Select a metric":
+        st.subheader("Configuration Options")
         # PDF parser selection
         pdf_parser = st.selectbox(
             "Select PDF Parser:",
@@ -426,12 +545,13 @@ with st.sidebar:
         st.session_state.llm_model = llm_model if llm_model != "Select Model" else None
     
     # For Nvidia Dataset, set default values
-    elif data_source == "Nvidia Dataset":
+    elif data_source == "Nvidia Dataset" and similarity_metric!="Select a metric":
+        st.subheader("Configuration Options")
         # Set default values for Nvidia Dataset
         st.session_state.pdf_parser = "Mistral"  
         st.session_state.rag_method = "ChromaDB"  
         st.session_state.chunking_strategy = "semantic_chunking"  
-        st.session_state.llm_model = st.session_state.available_models[0] if st.session_state.available_models else "gpt-4"  # Default model
+        st.session_state.llm_model = st.session_state.available_models[0] if st.session_state.available_models else "gpt-3.5-turbo"  # Default model
         
         # Display info about default configuration
         st.info("**Default Configuration for Nvidia Dataset**")
@@ -502,29 +622,31 @@ if st.session_state.get("next_clicked", False):
                 if "file_id" in upload_response and "markdown_path" in upload_response:
                     file_id = upload_response["file_id"]
                     markdown_path = upload_response["markdown_path"]
+                    markdown_filename = upload_response["markdown_filename"]
                     
-                # Replace the existing embedding button code (around line 462)
+    
                 if st.button("Process Chunking & Create Embeddings"):
-                    # Start the embedding process
+                    
                     embedding_response = process_rag_embeddings(
                         file_id, 
                         markdown_path,
+                        markdown_filename,
                         st.session_state.rag_method,
-                        st.session_state.chunking_strategy
+                        st.session_state.chunking_strategy,
+                        similarity_metric
                     )
                     
                     if "error" not in embedding_response:
                         # Get the job ID from the response
                         job_id = embedding_response.get("job_id")
                         if job_id:
-                            # Poll for job completion
-                            final_result = poll_for_embedding_status(job_id, max_retries=60)
+                            final_result = poll_for_embedding_status(job_id)
                             
                             if final_result and final_result.get("status") == "completed":
                                 st.success("✅ Embeddings created successfully!")
-                                st.info("You can now ask questions about your document.")
+                                namespace = markdown_filename.lower().replace(" ", "-").replace(".", "-")
+                                st.info(f"Your document was indexed in namespace: **{namespace}**")                             
                                 
-                                # Store the job_id for later reference
                                 st.session_state.embedding_job_id = job_id
                             else:
                                 st.error("Failed to create embeddings. Please try again.")
@@ -532,6 +654,7 @@ if st.session_state.get("next_clicked", False):
                             st.error("No job ID returned from the embedding creation process.")
                     else:
                         st.error(f"Embedding failed: {embedding_response.get('error')}")    
+
     elif st.session_state.data_source == "Nvidia Dataset":
         st.header("Query Nvidia Quarterly Reports")
         
@@ -560,15 +683,7 @@ if st.session_state.get("next_clicked", False):
         st.markdown("---")
         st.subheader("Ask Questions About the Data")
         # Similarity metric selection
-        similarity_metric = st.selectbox(
-            "Select Similarity Metric:",
-            [
-                "cosine_similarity",
-                "euclidean_distance",
-                "dot_product" 
-            ],
-            help="Choose how similarity between text chunks will be calculated"
-        )
+        
         st.session_state.similarity_metric = similarity_metric
         
         user_question = st.text_area(
@@ -583,7 +698,13 @@ if st.session_state.get("next_clicked", False):
             else:
                 # Submit RAG query using selected configuration
                 quarters = st.session_state.selected_quarters if st.session_state.data_source == "Nvidia Dataset" else None
-                result = submit_rag_query(user_question, st.session_state.llm_model, quarters)
+                json_path = st.session_state.get("json_path")
+                result = submit_rag_query(
+                    question=user_question, 
+                    model=st.session_state.llm_model, 
+                    quarters=quarters,
+                    json_path=json_path
+                    )
                 
                 if result:
                     # Display the answer
@@ -632,9 +753,9 @@ if st.session_state.show_token_usage:
     if "token_usage_records" not in st.session_state:
         st.session_state.token_usage_records = []
     if hasattr(st.session_state, "question_result") and st.session_state.question_result:
-        usage_data = st.session_state.question_result.get("usage", {})
-        if usage_data:
-            st.session_state.token_usage_records.append(usage_data)
+        result = st.session_state.question_result
+        usage_data = result.get("usage", {})
+        
         # extract usage data if available 
         if "usage" in result:
             if isinstance(usage_data, str):
@@ -643,17 +764,17 @@ if st.session_state.show_token_usage:
                 except:
                     usage_data = {"prompt_tokens": 0, "completion_tokens": 0,"total_tokens": 0}
             # Calculate costs based on the model
-            model_id = result.get("model_id", "gpt-4")
+            model_id = result.get("model_id", "gpt-3.5-turbo")
             cost_data = calculate_token_cost(model_id, usage_data)
 
-            #Create  a timestamp if not present
+            #Create a timestamp if not present
             if "timestamp" not in result:
                 result["timestamp"] = time.strftime("%Y-%m-%d %H:%M:%S")
             #Add to usage records if not already there 
             query_id = result.get("job_id", str(uuid.uuid4()))
 
             # Check if this exact query is already recorded
-            if not any(record.get("job_id")  == query_id for record in st.session_state.token_usage_records):
+            if not any(record.get("job_id") == query_id for record in st.session_state.token_usage_records):
                 st.session_state.token_usage_records.append({
                     "job_id": query_id,
                     "task_type": "RAG Query",
@@ -742,7 +863,7 @@ if st.session_state.show_token_usage:
                 st.warning(f"Could not generate charts: {str(e)}")    
 
 
-else:
+if not st.session_state.get("next_clicked", False):
     # Main landing page
     st.header("Welcome to the RAG Pipeline with Airflow")
     st.markdown("""

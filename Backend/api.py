@@ -1,12 +1,11 @@
-from fastapi import FastAPI, File, UploadFile, HTTPException, BackgroundTasks, Query
+from fastapi import FastAPI, File, UploadFile, HTTPException, BackgroundTasks, Query, APIRouter
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from datetime import datetime
 from typing import List, Dict, Optional, Any
 import os
 import uuid
-import asyncio
-from logger import api_logger, pdf_logger, error_logger, log_request, log_error
+from Backend.logger import api_logger, pdf_logger, error_logger, log_request, log_error
 import uvicorn
 import sys
 from pathlib import Path
@@ -18,10 +17,10 @@ project_root = os.path.dirname(current_dir)
 sys.path.insert(0, project_root)  # Add project root to path
 
 # Local imports
-from litellm_query_generator import generate_response, MODEL_CONFIGS
-from parsing_methods.doclingparsing import main as docling_parse
-from parsing_methods.mistralparsing import process_pdf as mistral_parse
-from parsing_methods.mistralparsing_userpdf import process_pdf as mistral_parse_pdf  # Updated import
+from Backend.litellm_query_generator import generate_response, MODEL_CONFIGS
+from Backend.parsing_methods.doclingparsing import main as docling_parse
+from Backend.parsing_methods.mistralparsing import process_pdf as mistral_parse
+from Backend.parsing_methods.mistralparsing_userpdf import process_pdf as mistral_parse_pdf  # Updated import
 
 # Import modules with absolute paths
 from Rag_modelings.chromadb_pipeline import (
@@ -36,7 +35,15 @@ from Rag_modelings.rag_pinecone import (
 
 
 # Initialize FastAPI app
-app = FastAPI(title="RAG Pipeline API")
+app = FastAPI(title="RAG Pipeline API",
+              description="API for processing PDFs and querying the RAG system",
+              version="1.0.0")
+# Create routers for different functional groups
+document_router = APIRouter(prefix="/documents", tags=["Document Processing"])
+embedding_router = APIRouter(prefix="/rag", tags=["Embeddings & Vector Storage"])
+query_router = APIRouter(prefix="/rag", tags=["RAG Queries"])
+job_status_router = APIRouter(prefix="/status", tags=["Job Status"])
+system_router = APIRouter(tags=["System"])
 
 # Add CORS middleware
 app.add_middleware(
@@ -55,28 +62,19 @@ os.makedirs(MARKDOWN_DIR, exist_ok=True)
 
 # In-memory storage
 job_store = {}
+query_job_store = {}
 embedding_store = {}
 
-# Pydantic models
-class DateRequest(BaseModel):
-    date: str  # Date format YYYY-MM-DD
-
-class RAGRequest(BaseModel):
-    request_id: str
-    question: str
-    model: str
-    parser: Optional[str] = None
-    rag_method: Optional[str] = None
-    chunking_strategy: Optional[str] = None
-    quarters: Optional[List[str]] = None
-
 class EmbeddingRequest(BaseModel):
+    file_id: Optional[str] = None
     markdown_path: str
     markdown_filename: str
     rag_method: str  # "chromadb" or "pinecone"
-    chunking_strategy: Optional[str] = "Semantic Chuking(Kamradt Method)"
+    chunking_strategy: Optional[str] = "semantic_chunking"
     embedding_model: Optional[str] = "text-embedding-ada-002"
-
+    similarity_metric: Optional[str] = "cosine"
+    namespace: Optional[str] = None
+    
 class ManualEmbeddingRequest(BaseModel):
     text: str
     embedding_id: str
@@ -87,54 +85,63 @@ class ManualEmbeddingRequest(BaseModel):
 class QueryRequest(BaseModel):
     query: str
     embedding_id: Optional[str] = None  # For manual embeddings
-    markdown_path: Optional[str] = None  # For markdown embeddings
+    json_path: Optional[str] = None  # For Pinecone embeddings
     rag_method: str  # "chromadb" or "pinecone"
     data_source: Optional[str] = None  # "Nvidia Dataset" or "PDF Upload"
     quarters: Optional[List[str]] = None  # List of quarters to filter by
     model_id: str = "gpt-3.5-turbo"  # Changed from "gpt4o" to "gpt-3.5-turbo"
     similarity_metric: Optional[str] = "cosine"
     top_k: Optional[int] = 5
-    filter_criteria: Optional[dict] =None
+    namespace: Optional[str] = None
     
-# Function to determine the quarter
-def get_quarter(date: str) -> str:
-    dt = datetime.strptime(date, "%Y-%m-%d")
-    year = dt.year
-    quarter = (dt.month - 1) // 3 + 1
-    return f"{year}q{quarter}"
 
-@app.get("/")
+@system_router.get("/")
 def read_root():
     return {"message": "RAG Pipeline API is running"}
 
-@app.get("/favicon.ico")
+@system_router.get("/favicon.ico")
 async def favicon():
     return {"message": "No favicon available"}
-
-@app.post("/get_quarter")
-def get_year_quarter(date_request: DateRequest):
+@system_router.get("/llm/models",tags=["LLM Models"])
+async def get_available_models():
+    # Return a list of supported LLM models
+    models = list(MODEL_CONFIGS.keys())
+    api_logger.info(f"Available LLM models: {', '.join(models)}")
+    return {"models": models}
+@system_router.get("/nvidia/quarters",tags=["Nvidia Dataset Quarters"])
+async def get_nvidia_quarters():
     try:
-        quarter_str = get_quarter(date_request.date)
-        return {"year_quarter": quarter_str}
+        # Get available NVIDIA quarterly reports (last 5 years)
+        current_year = datetime.now().year
+        quarters = []
+        for year in range(current_year-4, current_year+1):
+            for q in range(1, 5):
+                if year == current_year and q > ((datetime.now().month - 1) // 3 + 1):
+                    continue
+                quarters.append(f"{year}q{q}")
+        
+        api_logger.info(f"Returned {len(quarters)} available quarters")
+        return {"quarters": quarters}
     except Exception as e:
-        log_error(f"Error in get_quarter endpoint", e)
-        raise HTTPException(status_code=400, detail=str(e))
+        log_error("Error fetching Nvidia quarters", e)
+        raise HTTPException(status_code=500, detail=str(e))
 
-@app.post("/upload-pdf")
+@document_router.post("/upload-and-parse",summary="Upload PDF and parse with selected parser")
 async def upload_pdf(
     file: UploadFile = File(...),
     parser: str = Query("docling"),
-    rag_method: Optional[str] = Query(None),
-    chunking_strategy: Optional[str] = Query(None)
 ):
+    import tempfile
+    temp_file = None
     try:
         file_id = str(uuid.uuid4())
         filename = file.filename
-        file_path = os.path.join(UPLOAD_DIR, f"{file_id}_{filename}")
-
-        # Save the uploaded PDF
-        with open(file_path, "wb") as f:
-            f.write(await file.read())
+        
+        # Create a temporary file instead of saving to UPLOAD_DIR
+        temp_file = tempfile.NamedTemporaryFile(delete=False, suffix='.pdf')
+        temp_file_path = temp_file.name
+        temp_file.write(await file.read())
+        temp_file.close()  # Close the file so it can be read by the parsers
 
         # Generate the markdown path
         markdown_filename = os.path.splitext(filename)[0] + ".md"
@@ -144,7 +151,7 @@ async def upload_pdf(
         if parser.lower() == "docling":
             try:
                 # Docling accepts file path
-                result_path = docling_parse(file_path)
+                result_path = docling_parse(temp_file_path)
                 
                 # Read the content from that file
                 with open(result_path, "r", encoding="utf-8") as f:
@@ -156,7 +163,7 @@ async def upload_pdf(
         elif parser.lower() == "mistral":
             try:
                 # Mistral processing
-                pdf_path = Path(file_path)
+                pdf_path = Path(temp_file_path)
                 output_dir = Path(os.path.dirname(markdown_path))
                 output_dir.mkdir(parents=True, exist_ok=True)
                 
@@ -188,254 +195,186 @@ async def upload_pdf(
 
         return {
             "filename": filename,
-            "saved_as": file_path,
             "file_id": file_id,
             "markdown_path": markdown_path,
             "markdown_filename": markdown_filename,
             "parser": parser,
-            "rag_method": rag_method,
-            "chunking_strategy": chunking_strategy,
             "status": "success"
         }
 
     except Exception as e:
         log_error(f"Error uploading PDF", e)
         raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        # Delete temporary file if it exists
+        if temp_file and os.path.exists(temp_file.name):
+            os.unlink(temp_file.name)
+            api_logger.info(f"Temporary PDF file deleted: {temp_file.name}")
         
-@app.get("/nvidia/quarters")
-async def get_nvidia_quarters():
-    try:
-        # Get available NVIDIA quarterly reports (last 5 years)
-        current_year = datetime.now().year
-        quarters = []
-        for year in range(current_year-4, current_year+1):
-            for q in range(1, 5):
-                if year == current_year and q > ((datetime.now().month - 1) // 3 + 1):
-                    continue
-                quarters.append(f"{year}q{q}")
-        
-        api_logger.info(f"Returned {len(quarters)} available quarters")
-        return {"quarters": quarters}
-    except Exception as e:
-        log_error("Error fetching Nvidia quarters", e)
-        raise HTTPException(status_code=500, detail=str(e))
 
-@app.get("/llm/models")
-async def get_available_models():
-    # Return a list of supported LLM models
-    models = list(MODEL_CONFIGS.keys())
-    api_logger.info(f"Available LLM models: {', '.join(models)}")
-    return {"models": models}
-
-@app.post("/rag/query")
-async def rag_query(request: QueryRequest):
-    """Query the RAG system using the specified method and model"""
+async def process_rag_query_task(
+    query_job_id: str,
+    query: str,
+    rag_method: str,
+    model_id: str,
+    similarity_metric: str = "cosine",
+    top_k: int = 5,
+    namespace: str = None,
+    json_path: str = None,
+    data_source: str = None,
+    quarters: List[str] = None,
+    embedding_id: str = None
+):
     try:
-        log_request(f"RAG Query: {request.query}, Method: {request.rag_method}, Model: {request.model_id},DataSource: {request.data_source}")
+        api_logger.info(f"Starting background RAG query processing for job {query_job_id}")
+        query_job_store[query_job_id]["status"] = "processing"
         
         result = None
         
         # Handle manual embeddings
-        if request.embedding_id and request.embedding_id in embedding_store:
-            embedding_data = embedding_store[request.embedding_id] 
+        if embedding_id and embedding_id in embedding_store:
+            embedding_data = embedding_store[embedding_id] 
             chunks = embedding_data["chunks"]
             
             # Use LiteLLM to generate response directly
             response = generate_response(
                 chunks=chunks,
-                query=request.query,
-                model_id=request.model_id,
+                query=query,
+                model_id=model_id,
                 metadata=[embedding_data["metadata"] for _ in chunks]
             )
             
             result = {
                 "answer": response.get("answer", "Error generating response"),
                 "usage": response.get("usage", {}),
-                "source": f"Manual embedding (ID: {request.embedding_id})",
-                "chunks_used": len(chunks)
+                "source": f"Manual embedding (ID: {embedding_id})",
+                "chunks_used": len(chunks),
+                "status": "completed"
             }
         
         # Handle ChromaDB
-        elif request.rag_method.lower() == "chromadb":
+        elif rag_method.lower() == "chromadb":
+            api_logger.info(f"Processing ChromaDB query: {query}")
             result = chromadb_query(
-                query=request.query,
-                similarity_metric=request.similarity_metric,
-                llm_model=request.model_id,
-                top_k=request.top_k,
-                data_source=request.data_source,
-                quarters=request.quarters           
-            )   
+                query=query,
+                similarity_metric=similarity_metric,
+                llm_model=model_id,
+                top_k=top_k,
+                data_source=data_source,
+                quarters=quarters
+            )
+            result["status"] = "completed"
         
         # Handle Pinecone
-        elif request.rag_method.lower() == "pinecone":
-            # Use query_pinecone_rag instead of run_rag_pipeline
+        elif rag_method.lower() == "pinecone":
+            api_logger.info(f"Processing Pinecone query: {query}, with json_path: {json_path}")
             response = query_pinecone_rag(
-            query=request.query,
-            model_id=request.model_id,
-            similarity_metric=request.similarity_metric,
-            top_k=request.top_k,
-            filter_criteria=request.filter_criteria
-            
+                query=query,
+                model_id=model_id,
+                similarity_metric=similarity_metric,
+                top_k=top_k,
+                namespace=namespace,
+                json_path=json_path
             )
             
+            if "images_included" in response:
+                response["has_images"] = response["images_included"]
+            else:
+                response["has_images"] = False
+                
             # Format the result
             result = {
-            "answer": response.get("answer", "Error generating response"),
-            "usage": response.get("usage", {}),
-            "source": "Pinecone",
-            "chunks_used": response.get("chunks_used", 0)
+                "answer": response.get("answer", "Error generating response"),
+                "usage": response.get("usage", {}),
+                "source": "Pinecone",
+                "chunks_used": response.get("chunks_used", 0),
+                "has_images": response.get("has_images", False),
+                "namespace": response.get("namespace", None),
+                "status": "completed"
             }
         
         else:
-            raise HTTPException(status_code=400, detail=f"Unsupported RAG method: {request.rag_method}")
-        
-        return result
-    except Exception as e:
-        log_error(f"Error processing RAG query", e)
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.get("/get-llm-result/{request_id}")
-async def get_llm_result(request_id: str):
-    try:
-        if request_id not in job_store:
-            raise HTTPException(status_code=404, detail="Request not found")
-        
-        return job_store[request_id]
-    except Exception as e:
-        if isinstance(e, HTTPException):
-            raise e
-        log_error(f"Error getting LLM result", e)
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.post("/rag/config")
-async def set_rag_config(parser: str, rag_method: str, chunking_strategy: str):
-    try:
-        # This would save the configuration, perhaps trigger Airflow DAG setup
-        return {
-            "status": "success",
-            "config": {
-                "parser": parser,
-                "rag_method": rag_method,
-                "chunking_strategy": chunking_strategy
+            result = {
+                "status": "failed",
+                "error": f"Unsupported RAG method: {rag_method}"
             }
-        }
+        
+        # Update the query job store with the result
+        query_job_store[query_job_id].update(result)
+        api_logger.info(f"Completed RAG query processing for job {query_job_id}")
+        
     except Exception as e:
-        log_error(f"Error setting RAG config", e)
-        raise HTTPException(status_code=500, detail=str(e))
+        api_logger.error(f"Error processing RAG query in background task: {str(e)}")
+        query_job_store[query_job_id].update({
+            "status": "failed",
+            "error": str(e)
+        })
 
-# New endpoint for creating embeddings from markdown
-@app.post("/rag/create-embeddings")
-async def create_embeddings(request: EmbeddingRequest, background_tasks: BackgroundTasks):
-    """Create embeddings from a markdown file using ChromaDB or Pinecone"""
+@query_router.post("/query",summary="Execute a RAG query with background processing")
+async def rag_query(request: QueryRequest, background_tasks: BackgroundTasks):
+    """Query the RAG system using the specified method and model with background processing"""
     try:
-        log_request(f"Creating embeddings for {request.markdown_filename} using {request.rag_method}")
+        log_request(f"RAG Query: {request.query}, Method: {request.rag_method}, Model: {request.model_id}, DataSource: {request.data_source}")
         
-        # Verify the markdown file exists
-        markdown_path = request.markdown_path
-        markdown_filename = request.markdown_filename
-        if not os.path.exists(markdown_path):
-            markdown_path = os.path.join(MARKDOWN_DIR, os.path.basename(request.markdown_path))
-            if not os.path.exists(markdown_path):
-                raise HTTPException(status_code=404, detail=f"Markdown file not found: {request.markdown_path}")
+        # Create a job ID for this query
+        query_job_id = str(uuid.uuid4())
         
-        # Create a job ID
-        job_id = str(uuid.uuid4())
-        
-        # Initialize job status
-        job_store[job_id] = {
-            "status": "processing",
-            "markdown_path": markdown_path,
+        # Initialize the query job in the store
+        query_job_store[query_job_id] = {
+            "status": "initializing",
+            "query": request.query,
             "rag_method": request.rag_method,
-            "chunking_strategy": request.chunking_strategy
+            "model_id": request.model_id,
+            "timestamp": datetime.now().isoformat()
         }
         
-        # Process embeddings in the background
+        # Add the background task
         background_tasks.add_task(
-            process_embeddings,
-            job_id,
-            markdown_path,
-            markdown_filename,
-            request.rag_method,
-            request.chunking_strategy,
-            request.embedding_model
+            process_rag_query_task,
+            query_job_id=query_job_id,
+            query=request.query,
+            rag_method=request.rag_method,
+            model_id=request.model_id,
+            similarity_metric=request.similarity_metric,
+            top_k=request.top_k,
+            namespace=request.namespace,
+            json_path=request.json_path,
+            data_source=request.data_source,
+            quarters=request.quarters,
+            embedding_id=request.embedding_id
         )
         
+        # Return immediately with the job ID
         return {
-            "job_id": job_id,
+            "query_job_id": query_job_id,
             "status": "processing",
-            "message": f"Creating embeddings for {os.path.basename(markdown_path)} using {request.rag_method}",
-            "poll_interval": 2,  # Poll every 2 seconds
-            "status_endpoint": f"/rag/job-status/{job_id}"  # Provide the endpoint to poll
+            "message": "RAG query is being processed in the background",
+            "poll_interval": 1,
+            "status_endpoint": f"/query/{query_job_id}"
         }
+        
     except Exception as e:
-        log_error(f"Error creating embeddings", e)
+        log_error(f"Error initiating RAG query", e)
         raise HTTPException(status_code=500, detail=str(e))
     
-@app.post("/rag/manual-embedding")
-async def create_manual_embedding(request: ManualEmbeddingRequest):
-    """Create embeddings from text provided directly by the user"""
-    try:
-        log_request(f"Creating manual embedding with ID {request.embedding_id}")
-        
-        # Set default metadata if not provided
-        metadata = request.metadata or {
-            "source": "manual_input",
-            "timestamp": datetime.now().isoformat()
-        }
-        
-        # Apply chunking
-        chunks = process_document_with_chunking(request.text, request.chunking_strategy)
-        
-        # Store in embedding_store for later use
-        embedding_store[request.embedding_id] = {
-            "chunks": chunks,
-            "rag_method": request.rag_method,
-            "chunking_strategy": request.chunking_strategy,
-            "metadata": metadata,
-            "timestamp": datetime.now().isoformat()
-        }
-        
-        return {
-            "embedding_id": request.embedding_id,
-            "chunks_count": len(chunks),
-            "rag_method": request.rag_method,
-            "status": "completed"
-        }
-    except Exception as e:
-        log_error(f"Error creating manual embedding", e)
-        raise HTTPException(status_code=500, detail=str(e))
 
-@app.get("/rag/job-status/{job_id}")
-async def get_job_status(job_id: str):
-    """Get the status of an embedding job"""
-    if job_id not in job_store:
-        raise HTTPException(status_code=404, detail="Job not found")
+@job_status_router.get("/query/{query_job_id}",summary="Get query job status")
+async def get_query_status(query_job_id: str):
+    """Get the status of a RAG query job"""
+    if query_job_id not in query_job_store:
+        raise HTTPException(status_code=404, detail="Query job not found")
     
-    return job_store[job_id]
+    return query_job_store[query_job_id]
 
-@app.get("/rag/embeddings")
-async def list_embeddings():
-    """List all manual embeddings stored in memory"""
-    return {
-        "embeddings": [
-            {
-                "id": k,
-                "chunks_count": len(v["chunks"]),
-                "rag_method": v["rag_method"],
-                "timestamp": v["timestamp"]
-            } 
-            for k, v in embedding_store.items()
-        ]
-    }
-
-# Background task for processing embeddings
 async def process_embeddings(
     job_id: str,
     markdown_path: str,
     markdown_filename: str,
     rag_method: str,
     chunking_strategy: str,
-    embedding_model: str = "all-MiniLM-L6-v2" 
+    embedding_model: str = "all-MiniLM-L6-v2",
+    similarity_metric: str = "cosine",
+    namespace: str = None
 ):
     try:
         # Read markdown content
@@ -477,7 +416,9 @@ async def process_embeddings(
                 result = load_data_to_pinecone(
                     markdown_content=markdown_content,
                     chunking_strategy=chunking_strategy,
-                    file_name=file_name
+                    file_name=file_name,
+                    namespace=file_name,
+                    similarity_metric=similarity_metric
                 )
                 
                 if result["status"] == "success":
@@ -485,13 +426,14 @@ async def process_embeddings(
                     job_store[job_id].update({
                         "status": "completed",
                         "chunks_total": result["total_chunks"],
+                        "namespace": result["namespace"],
                         "vectors_uploaded": result["vectors_uploaded"],
                         "chunking_strategy": chunking_strategy,
                         "timestamp": datetime.now().isoformat(),
                         "file_name": file_name,
                         "json_path": result.get("json_path")
                     })
-                    api_logger.info(f"Successfully processed document: {result['vectors_uploaded']} vectors uploaded")
+                    api_logger.info(f"Successfully processed document: {result['vectors_uploaded']} vectors uploaded and the chunks are stored in {result['json_path']}")
                 else:
                     # Handle error case
                     job_store[job_id].update({
@@ -524,6 +466,135 @@ async def process_embeddings(
             "error": str(e)
         })
 
-if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+@embedding_router.post("/create-embeddings",summary="Create embeddings from a markdown file/nvidia datasets")
+async def create_embeddings(request: EmbeddingRequest, background_tasks: BackgroundTasks):
+    """Create embeddings from a markdown file using ChromaDB or Pinecone"""
+    try:
+        log_request(f"Creating embeddings for {request.markdown_filename} using {request.rag_method}")
+        
+        # Verify the markdown file exists
+        markdown_path = request.markdown_path
+        markdown_filename = request.markdown_filename
+        # Create a job ID
+        job_id = str(uuid.uuid4())
+        similarity_metric = request.similarity_metric
+        namespace = request.namespace
+        
+        # Initialize job status
+        job_store[job_id] = {
+            "status": "processing",
+            "markdown_path": markdown_path,
+            "rag_method": request.rag_method,
+            "chunking_strategy": request.chunking_strategy,
+            "similarity_metric": similarity_metric,
+            "namespace": namespace
+        }
+        
+        # Process embeddings in the background
+        background_tasks.add_task(
+            process_embeddings,
+            job_id,
+            markdown_path,
+            markdown_filename,
+            request.rag_method,
+            request.chunking_strategy,
+            request.embedding_model,
+            similarity_metric,
+            namespace
+        )
+        
+        return {
+            "job_id": job_id,
+            "status": "processing",
+            "message": f"Creating embeddings for {os.path.basename(markdown_path)} using {request.rag_method}",
+            "poll_interval": 2,  # Poll every 2 seconds
+            "status_endpoint": f"/job/{job_id}"  # Provide the endpoint to poll
+        }
+    except Exception as e:
+        log_error(f"Error creating embeddings", e)
+        raise HTTPException(status_code=500, detail=str(e))
+    
+@embedding_router.post("/manual-embedding",summary="Create embeddings from text provided directly by the user")
+async def create_manual_embedding(request: ManualEmbeddingRequest):
+    """Create embeddings from text provided directly by the user"""
+    try:
+        log_request(f"Creating manual embedding with ID {request.embedding_id}")
+        
+        # Set default metadata if not provided
+        metadata = request.metadata or {
+            "source": "manual_input",
+            "timestamp": datetime.now().isoformat()
+        }
+        
+        # Apply chunking
+        chunks = process_document_with_chunking(request.text, request.chunking_strategy)
+        
+        # Store in embedding_store for later use
+        embedding_store[request.embedding_id] = {
+            "chunks": chunks,
+            "rag_method": request.rag_method,
+            "chunking_strategy": request.chunking_strategy,
+            "metadata": metadata,
+            "timestamp": datetime.now().isoformat()
+        }
+        
+        return {
+            "embedding_id": request.embedding_id,
+            "chunks_count": len(chunks),
+            "rag_method": request.rag_method,
+            "status": "completed"
+        }
+    except Exception as e:
+        log_error(f"Error creating manual embedding", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+@job_status_router.get("/job/{job_id}",summary="Get embedding job status")
+async def get_job_status(job_id: str):
+    """Get the status of an embedding job"""
+    if job_id not in job_store:
+        raise HTTPException(status_code=404, detail="Job not found")
+    
+    return job_store[job_id]
+
+@embedding_router.get("/embeddings",summary="List all manual embeddings stored in memory")
+async def list_embeddings():
+    """List all manual embeddings stored in memory"""
+    return {
+        "embeddings": [
+            {
+                "id": k,
+                "chunks_count": len(v["chunks"]),
+                "rag_method": v["rag_method"],
+                "timestamp": v["timestamp"]
+            } 
+            for k, v in embedding_store.items()
+        ]
+    }
+
+@embedding_router.post("/config",summary="Set the RAG configuration")
+async def set_rag_config(parser: str, rag_method: str, chunking_strategy: str):
+    try:
+        # This would save the configuration, perhaps trigger Airflow DAG setup
+        return {
+            "status": "success",
+            "config": {
+                "parser": parser,
+                "rag_method": rag_method,
+                "chunking_strategy": chunking_strategy
+            }
+        }
+    except Exception as e:
+        log_error(f"Error setting RAG config", e)
+        raise HTTPException(status_code=500, detail=str(e))
+    
+
+
+
+
+# Include all routers
+app.include_router(system_router)
+app.include_router(document_router)
+app.include_router(embedding_router)
+app.include_router(query_router)
+app.include_router(job_status_router)
 
