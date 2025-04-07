@@ -8,9 +8,13 @@ lock:
 update:
 	poetry update
 
+rag_manual:
+	poetry run python .\Rag_modelings\rag_manual.py
 
 
 
+
+	
 	
 backend:
 	poetry run uvicorn Backend.api:app --host 0.0.0.0 --port 8000 --reload
