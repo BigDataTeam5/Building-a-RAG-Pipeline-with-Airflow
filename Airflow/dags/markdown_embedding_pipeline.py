@@ -6,13 +6,14 @@ from airflow import DAG
 from airflow.operators.python import PythonOperator
 from airflow.sensors.external_task import ExternalTaskSensor
 from sentence_transformers import SentenceTransformer
-import chromadb
-from chromadb.config import Settings
 from airflow.providers.amazon.aws.hooks.s3 import S3Hook
 from dotenv import load_dotenv
 import re
 import shutil
 from utils.chunking import KamradtModifiedChunker  # Assuming Kamradt chunking is available
+from pinecone import Pinecone, ServerlessSpec
+import pinecone
+import uuid
 
 # Load configuration
 with open('/opt/airflow/config/nvidia_config.json') as config_file:
@@ -76,14 +77,16 @@ def list_and_download_markdown_files(**context):
             path_parts = file_path.split('/')
             if len(path_parts) >= 3:
                 year = path_parts[-2] if path_parts[-2].isdigit() else "unknown"
-                file_name = path_parts[-1].lower()
-                if 'q1'  or 'Q1' in file_name:
+                file_name = path_parts[-1]  # Don't lowercase the filename here
+                
+                # Fix quarter detection by extracting directly from filename
+                if file_name == "Q1.md" or file_name == "q1.md":
                     quarter = "Q1"
-                elif 'q2' or 'Q2'  in file_name:
+                elif file_name == "Q2.md" or file_name == "q2.md":
                     quarter = "Q2"
-                elif 'q3' or 'Q3' in file_name:
-                    quarter = "Q3"
-                elif 'q4' or 'Q4' in file_name:
+                elif file_name == "Q3.md" or file_name == "q3.md":
+                    quarter = "Q3" 
+                elif file_name == "Q4.md" or file_name == "q4.md":
                     quarter = "Q4"
                 else:
                     quarter = "unknown"
@@ -107,6 +110,7 @@ def list_and_download_markdown_files(**context):
                     f.write(object_data)
                     
                 print(f"Downloaded {file_path} to {local_file_path}")
+                print(f"Detected year: {year}, quarter: {quarter} for file {file_name}")
                 
                 markdown_files.append({
                     "year": year,
@@ -173,104 +177,199 @@ def kamradt_chunking(**context):
     
     ti.xcom_push(key='all_chunks_info', value=all_chunks_info)
 
-def process_chunks_to_chromadb(**context):
+
+def store_chunks_to_pinecone(**context):
+    load_dotenv('/opt/airflow/.env')
     ti = context['ti']
     all_chunks_info = ti.xcom_pull(key='all_chunks_info', task_ids='kamradt_chunking')
     if not all_chunks_info:
-        print("No chunks found for processing.")
+        print("No chunk info available for Pinecone processing.")
         return
     
-    model = SentenceTransformer("all-MiniLM-L6-v2")
-    CHROMA_DB_PATH  = config['CHROMA_DB_PATH']
-    client = chromadb.PersistentClient(path=CHROMA_DB_PATH)
-    try:
-        client.delete_collection("nvidia_embeddings")
-        print("Existing collection deleted successfully")
-    except Exception as e:
-        print(f"No existing collection to delete or error: {str(e)}")
+    # Get S3 hook and config
+    AWS_CONN_ID = config['AWS_CONN_ID']
+    BUCKET_NAME = config['BUCKET_NAME']
+    s3_hook = S3Hook(aws_conn_id=AWS_CONN_ID)
     
-    collection = client.get_or_create_collection(
-        name="nvidia_embeddings",
-        metadata={"description": "NVIDIA markdown documents with embeddings",
-                  "last_refreshed": datetime.now().isoformat()}
+    # Set up Pinecone
+    pinecone_api_key = os.getenv("PINECONE_API_KEY")
+    pinecone_env = os.getenv("PINECONE_ENV")  # Example: "gcp-starter"
+    index_name = "nvidia-reports"
+
+    # Init Pinecone client with new API
+    pc = Pinecone(api_key=pinecone_api_key)
+    
+    # Create index if it doesn't exist
+    existing_indexes = pc.list_indexes().names()
+    if index_name in existing_indexes:
+        # delete the index if it already exists
+        pc.delete_index(index_name)
+        print(f"Deleted existing index: {index_name}")
+    
+    # Create a new index
+    pc.create_index(
+        name=index_name,
+        dimension=384,
+        metric="cosine",
+        spec=ServerlessSpec(cloud="aws", region="us-east-1")
     )
+    print(f"Created index: {index_name}")
     
-    total_chunks_processed = 0
+    index = pc.Index(index_name)
+    model = SentenceTransformer("all-MiniLM-L6-v2")
+    
+    # Group chunks by namespace
+    namespace_chunks = {}
     
     for file_info in all_chunks_info:
         year = file_info['year']
-        quarter = file_info['quarter']
-        chunks = file_info['chunks']
-        file_name = file_info['file_name']
+        quarter = file_info['quarter'].lower()
+        namespace = f"{year}{quarter}" if year != "unknown" and quarter != "unknown" else "unknown"
         
+        # Initialize namespace dict if not exists
+        if namespace not in namespace_chunks:
+            namespace_chunks[namespace] = []
+        
+        # Add this file's chunks to the namespace collection
+        namespace_chunks[namespace].append(file_info)
+    
+    # Process each namespace
+    for namespace, files_info in namespace_chunks.items():
         try:
-            embeddings = [model.encode(chunk).tolist() for chunk in chunks]
-            ids = [f"{file_name}_{i}" for i in range(len(chunks))]
-            metadatas = [
-                {
-                    "year": year,
-                    "quarter": quarter,
-                    "source": file_info['s3_file_path'],
-                    "file_name": file_name,
-                    "chunk_index": i
-                }
-                for i in range(len(chunks))
-            ]
+            print(f"Processing namespace: {namespace}")
             
-            collection.add(
-                ids=ids,
-                documents=chunks,
-                embeddings=embeddings,
-                metadatas=metadatas,
-            )
-            
-            total_chunks_processed += len(chunks)
-            print(f"Processed and stored {len(chunks)} chunks for {file_name}")
-        except Exception as e:
-            print(f"Error processing chunks for {file_name}: {str(e)}")
-    
-    ti.xcom_push(key='total_chunks_processed', value=total_chunks_processed)
-    
-    temp_dir = ti.xcom_pull(key='temp_directory', task_ids='kamradt_chunking')
-    if temp_dir and os.path.exists(temp_dir):
-        try:
-            shutil.rmtree(temp_dir)
-            print(f"Cleaned up temporary directory: {temp_dir}")
-        except Exception as e:
-            print(f"Error cleaning up temporary directory: {str(e)}")
-    
-    return "Processing complete"
+            # Create JSON for all chunks in this namespace
+            json_filename = f"{namespace}.json"
+            s3_json_path = f"chunks/{json_filename}"
 
-def display_first_embeddings(**context):
-    CHROMA_DB_PATH = config['CHROMA_DB_PATH']
-    client = chromadb.PersistentClient(path=CHROMA_DB_PATH)
+            sample_files = [f['file_name'] for f in files_info[:5]]
+            print(f"Processing {len(files_info)} files in namespace '{namespace}' with sample files: {sample_files}")
+
+            
+            # Prepare chunks data
+            chunks_data = {}
+            
+            for file_info in files_info:
+                file_name = file_info['file_name']
+                chunks = file_info['chunks']
+                
+                for i, chunk in enumerate(chunks):
+                    chunk_id = f"{file_name}_{i}"
+                    chunks_data[chunk_id] = {
+                        "text": chunk,
+                        "file_name": file_name,
+                        "year": file_info['year'],
+                        "quarter": file_info['quarter'],
+                        "chunk_index": i
+                    }
+            
+            # Save JSON to temporary file then upload to S3
+            with tempfile.NamedTemporaryFile(mode='w+', suffix='.json', delete=False) as temp_json:
+                json.dump(chunks_data, temp_json, ensure_ascii=False, indent=2)
+                temp_json_path = temp_json.name
+            
+            # Upload JSON file to S3
+            s3_hook.load_file(
+                filename=temp_json_path,
+                key=s3_json_path,
+                bucket_name=BUCKET_NAME,
+                replace=True
+            )
+            os.unlink(temp_json_path)  # Clean up temp file
+            
+            print(f"Uploaded chunks JSON to s3://{BUCKET_NAME}/{s3_json_path}")
+            
+            # Now create vectors for Pinecone with references to S3 instead of full text
+            vectors = []
+            for file_info in files_info:
+                file_name = file_info['file_name']
+                chunks = file_info['chunks']
+                s3_path = file_info['s3_file_path']
+                year = file_info['year']
+                quarter = file_info['quarter']
+                
+                for i, chunk in enumerate(chunks):
+                    chunk_id = f"{file_name}_{i}"
+                    embedding = model.encode(chunk).tolist()
+                    vector_id = str(uuid.uuid4())
+                    
+                    # Create metadata WITHOUT the full text
+                    metadata = {
+                        "year": year,
+                        "quarter": quarter.upper(),
+                        "source": s3_path,
+                        "file_name": file_name,
+                        "chunk_index": i,
+                        "json_source": f"s3://{BUCKET_NAME}/{s3_json_path}",
+                        "chunk_id": chunk_id,
+                        "text_preview": chunk[:100] if len(chunk) > 100 else chunk  # Just a preview
+                    }
+                    
+                    vectors.append((vector_id, embedding, metadata))
+            
+            # Batch upload to Pinecone (100 vectors at a time)
+            for i in range(0, len(vectors), 100):
+                batch = vectors[i:i+100]
+                index.upsert(vectors=batch, namespace=namespace)
+                print(f"Upserted batch {i//100 + 1}/{(len(vectors)-1)//100 + 1} to namespace '{namespace}'")
+        
+        except Exception as e:
+            print(f"Failed to process namespace {namespace}: {e}")
+
+    return f"Uploaded all chunks to Pinecone index: {index_name}"
+
+
+
+def display_first_vectors_from_pinecone(**context):
+    load_dotenv('/opt/airflow/.env')
+    pinecone_api_key = os.getenv("PINECONE_API_KEY")
+    index_name = "nvidia-reports"
+
+    # Use the new Pinecone API pattern
+    pc = Pinecone(api_key=pinecone_api_key)
     
     try:
-        collection = client.get_collection("nvidia_embeddings")
-        result = collection.get(limit=10)
-        
-        print("\n===== FIRST 10 EMBEDDINGS IN COLLECTION =====")
-        for i in range(len(result['ids'])):
-            doc_id = result['ids'][i]
-            metadata = result['metadatas'][i] if result['metadatas'] else {}
-            document = result['documents'][i] if result['documents'] else "No document text"
+        # Check if index exists
+        if index_name not in pc.list_indexes().names():
+            print(f"Index '{index_name}' does not exist.")
+            return
             
-            print(f"\n----- Entry {i+1} -----")
-            print(f"ID: {doc_id}")
-            print(f"Metadata: Year={metadata.get('year', 'N/A')}, Quarter={metadata.get('quarter', 'N/A')}")
-            print(f"Source: {metadata.get('source', 'N/A')}")
-            print(f"Document preview: {document[:150]}...")
-            
-            if result['embeddings'] and len(result['embeddings']) > i:
-                embedding = result['embeddings'][i]
-                print(f"Embedding dimensions: {len(embedding)}")
-                print(f"Embedding preview: [{', '.join(f'{v:.4f}' for v in embedding[:5])}...]")
+        index = pc.Index(index_name)
         
-        print("\n===== END OF EMBEDDINGS PREVIEW =====")
-        return {"total_entries": collection.count(), "displayed_entries": len(result['ids'])}
+        # Get index stats to find namespaces
+        index_stats = index.describe_index_stats()
+        print(f"Index '{index_name}' has {index_stats.num_vectors} vectors in {index_stats.num_namespaces} namespaces.")
+        namespaces = index_stats.namespaces
+        
+        if not namespaces:
+            print("No namespaces found in index.")
+            return
+        
+        for namespace_name in namespaces.keys():
+            print(f"\nNamespace: {namespace_name}")
+            try:
+                # Query with zero vector to get a sample of vectors
+                response = index.query(
+                    vector=[0.0] * 384,  # Dimension must match your index
+                    top_k=10,
+                    include_metadata=True,
+                    namespace=namespace_name
+                )
+                
+                print(f"Displaying up to 10 vectors from namespace: {namespace_name}")
+                for i, match in enumerate(response.matches):
+                    print(f"\n--- Vector {i+1} ---")
+                    print(f"ID: {match.id}")
+                    print(f"Score: {match.score:.4f}")
+                    print(f"Metadata: {match.metadata}")
+                    preview = match.metadata.get('text_preview', '')[:150]
+                    print(f"Text Preview: {preview}...")
+            except Exception as e:
+                print(f"Error querying namespace '{namespace_name}': {e}")
     except Exception as e:
-        print(f"Error displaying embeddings: {str(e)}")
-        return {"error": str(e)}
+        print(f"Error accessing Pinecone: {e}")
+
+
 
 # Define the tasks in the DAG
 list_and_download_task = PythonOperator(
@@ -287,18 +386,19 @@ kamradt_chunking_task = PythonOperator(
     dag=dag,
 )
 
-process_chunks_task = PythonOperator(
-    task_id="process_chunks_to_chromadb",
-    python_callable=process_chunks_to_chromadb,
+
+store_to_pinecone_task = PythonOperator(
+    task_id="store_chunks_to_pinecone",
+    python_callable=store_chunks_to_pinecone,
     provide_context=True,
     dag=dag,
 )
 
-display_embeddings_task = PythonOperator(
-    task_id="display_first_embeddings",
-    python_callable=display_first_embeddings,
+display_pinecone_vectors_task = PythonOperator(
+    task_id="display_first_vectors_from_pinecone",
+    python_callable=display_first_vectors_from_pinecone,
     provide_context=True,
     dag=dag,
 )
 
-list_and_download_task >> kamradt_chunking_task >> process_chunks_task >> display_embeddings_task
+list_and_download_task >> kamradt_chunking_task >> store_to_pinecone_task >> display_pinecone_vectors_task
