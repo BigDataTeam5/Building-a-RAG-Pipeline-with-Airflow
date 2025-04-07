@@ -505,6 +505,32 @@ def load_data_to_local_db(markdown_content, chunking_strategy, client, file_name
     save_vectors_to_local_db(vectors)
     print(f"Successfully saved {len(vectors)} vectors to local database.") 
 
+def load_data_to_memory(markdown_content, chunking_strategy, client):
+    """Process document and load embeddings into memory."""
+    print(f"Processing document with {chunking_strategy} strategy...")
+    chunks = process_document_with_chunking(markdown_content, chunking_strategy)
+    if not chunks:
+        raise ValueError("No chunks were generated from the document")
+    print(f"Generated {len(chunks)} chunks from document")
+
+    # Store embeddings and metadata in memory
+    memory_store = []
+    for i, chunk in enumerate(chunks):
+        text = chunk if isinstance(chunk, str) else chunk.get("text", "")
+        vector = get_embedding(text, client)  # Compute embedding
+        metadata = {
+            "chunk_id": i,
+            "text_preview": text[:100],
+            "text": text
+        }
+        memory_store.append({
+            "vector": vector,
+            "metadata": metadata
+        })
+
+    print(f"Successfully loaded {len(memory_store)} embeddings into memory.")
+    return memory_store
+
 def query_local_rag(query, model_id, client, top_k=5, namespace=None):
     """Query local SQLite database for relevant chunks."""
     query_embedding = get_query_embedding(query, client)  # Pass the client here
@@ -534,46 +560,51 @@ def query_local_rag(query, model_id, client, top_k=5, namespace=None):
         "answer": response["content"],
         "sources": sources
     }
-    
 
-# def view_first_10_vectors():
-#     """View the first 10 vectors in the Pinecone index"""
-#     try:
-#         # Get existing connections
-#         client, _, index, index_name = get_or_create_connections()
-        
-#         if index is None:
-#             logger.error("No Pinecone index exists. Please create embeddings first.")
-#             return
-        
-#         # Query to get first 10 vectors
-#         results = index.query(
-#             vector=[0] * 1536,  # Dummy vector
-#             top_k=10,
-#             include_metadata=True
-#         )
-        
-#         # Get the first 10 items
-#         first_10 = results.matches
-        
-#         print("\nFirst 10 vectors in the index:")
-#         for i, match in enumerate(first_10, 1):
-#             print(f"\n{i}. Vector ID: {match.id}")
-#             print(f"   File: {match.metadata.get('file_name', 'Unknown')}")
-#             print(f"   Preview: {match.metadata['text_preview'][:100]}...")
-            
-#     except Exception as e:
-#         print(f"Error fetching vectors: {str(e)}")
+def query_memory_rag(query, memory_store, client, top_k=5):
+    """Query in-memory embeddings for relevant chunks."""
+    query_embedding = get_query_embedding(query, client)  # Compute query embedding
+
+    # Calculate cosine similarity
+    results = []
+    for item in memory_store:
+        stored_vector = item["vector"]
+        similarity = np.dot(query_embedding, stored_vector) / (
+            np.linalg.norm(query_embedding) * np.linalg.norm(stored_vector)
+        )
+        results.append((similarity, item["metadata"]))
+
+    # Sort results by similarity and retrieve top-K
+    results = sorted(results, key=lambda x: x[0], reverse=True)[:top_k]
+
+    # Format results
+    sources = []
+    for similarity, metadata in results:
+        sources.append({
+            "score": similarity,
+            "text_preview": metadata["text_preview"],
+            "text": metadata["text"]
+        })
+
+    # Generate response using the top-K chunks
+    response = generate_response(
+        query=query,
+        context_chunks=[src["text"] for src in sources],
+        client=client,
+        model_id="claude-3-5-sonnet-20241022"
+    )
+
+    return {
+        "answer": response["content"],
+        "sources": sources
+    }
 
 # Update the main function call
 def main():
-    """Main function to run the RAG pipeline"""
+    """Main function to run the naive RAG pipeline."""
     try:
         # Initialize the Anthropic client
         client = initialize_anthropic_client()
-        
-        # Initialize the local database
-        initialize_local_db()
         
         # Define the file path for the markdown file
         file_path = "chromadb_pipeline_filesturcture.md"
@@ -585,21 +616,20 @@ def main():
         with open(file_path, "r", encoding="utf-8") as f:
             markdown_content = f.read()
         
-        # Load data into the local database
-        print(f"Loading data from {file_path} into local database...")
-        load_data_to_local_db(
+        # Load data into memory
+        print(f"Loading data from {file_path} into memory...")
+        memory_store = load_data_to_memory(
             markdown_content=markdown_content,
             chunking_strategy="recursive_chunking",
-            client=client,
-            file_name=os.path.basename(file_path)
+            client=client
         )
         
         # Test query
         print("\nTesting query...")
         query = "What is the structure of the ChromaDB pipeline?"
-        response = query_local_rag(
+        response = query_memory_rag(
             query=query,
-            model_id="claude-3-5-sonnet-20241022",  # Corrected model name
+            memory_store=memory_store,
             client=client,
             top_k=5
         )
@@ -609,7 +639,7 @@ def main():
         print(f"Answer: {response['answer']}")
         print("\nSources:")
         for source in response['sources']:
-            print(f"- {source['document']}: {source['preview']} (Score: {source['score']:.4f})")
+            print(f"- {source['text_preview']} (Score: {source['score']:.4f})")
             
     except Exception as e:
         print(f"Error in main: {str(e)}")
