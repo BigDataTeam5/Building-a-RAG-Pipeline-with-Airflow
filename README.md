@@ -67,7 +67,6 @@ The goal is to build a scalable, modular system that extracts insights from **NV
 │   └── 📄 Dockerfile
 ├── 📂 Backend/
 │   ├── 📄 __init__.py
-│   ├── 📄 main.py
 │   ├── 📄 api.py
 │   ├── 📄 logger.py
 │   ├── 📄 litellm_query_generator.py
