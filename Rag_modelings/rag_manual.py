@@ -20,7 +20,6 @@ from chunking_evaluation.chunking import (
     RecursiveTokenChunker,
     KamradtModifiedChunker,
     ClusterSemanticChunker,
-    LLMSemanticChunker
 )
 
 # Remove the global tiktoken initialization
@@ -453,31 +452,45 @@ def generate_response(query, context_chunks, client, model_id="claude-3-5-sonnet
             context = "\n".join([chunk['metadata']['text_preview'] for chunk in context_chunks])
         else:
             context = "\n".join(context_chunks)
+        
+        # Create the prompt for counting tokens
+        prompt = f"Context: {context}\n\nQuestion: {query}\n\nAnswer the question based on the context provided."
+        
+        # Count tokens in prompt using tiktoken
+        enc = get_tiktoken_encoding()
+        prompt_tokens = len(enc.encode(prompt)) if enc else len(prompt) // 4
             
         # Create message for Anthropic using the correct format
         response = client.messages.create(
-            model=model_id,  # Use the correct model name
+            model=model_id,
             system="You are a helpful assistant. Answer the question based on the provided context.",
             messages=[{
                 "role": "user",
-                "content": f"Context: {context}\n\nQuestion: {query}\n\nAnswer the question based on the context provided."
+                "content": prompt
             }],
             max_tokens=500,
             temperature=0.7
         )
         
+        # Count completion tokens
+        completion_text = response.content[0].text
+        completion_tokens = len(enc.encode(completion_text)) if enc else len(completion_text) // 4
+        
+        # Calculate total tokens
+        total_tokens = prompt_tokens + completion_tokens
+        
         return {
-            "content": response.content[0].text,
+            "content": completion_text,
             "usage": {
-                "prompt_tokens": 0,
-                "completion_tokens": 0,
-                "total_tokens": 0
+                "prompt_tokens": prompt_tokens,
+                "completion_tokens": completion_tokens,
+                "total_tokens": total_tokens
             }
         }
     except Exception as e:
         logger.error(f"Error generating response: {str(e)}")
         return {"error": str(e)}
-
+    
 def load_data_to_local_db(markdown_content, chunking_strategy, client, file_name=None, namespace=None):
     """Process document and load vectors into local SQLite database."""
     print(f"Processing document with {chunking_strategy} strategy...")
@@ -596,7 +609,9 @@ def query_memory_rag(query, memory_store, client, top_k=5):
 
     return {
         "answer": response["content"],
-        "sources": sources
+        "sources": sources,
+        "usage": response["usage"],  # Make sure usage is passed through
+        "query": query  # Include the original query
     }
 
 # Update the main function call

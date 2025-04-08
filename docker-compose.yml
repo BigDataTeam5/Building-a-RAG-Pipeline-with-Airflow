@@ -4,8 +4,8 @@ x-airflow-common:
   &airflow-common
   image: airflow-custom:latest  # Use the custom image instead of apache/airflow
   build:
-    context: ./Airflow  # Use the Airflow directory as the build context
-    dockerfile: Dockerfile  
+    context: .
+    dockerfile: ./Airflow/Dockerfile   
   environment:
     &airflow-common-env
     AIRFLOW__CORE__EXECUTOR: CeleryExecutor
@@ -22,11 +22,12 @@ x-airflow-common:
     - ./Airflow/logs:/opt/airflow/logs
     - ./Airflow/config:/opt/airflow/config
     - ./Airflow/plugins:/opt/airflow/plugins
-    - ./Airflow/requirements.txt:/opt/airflow/requirements.txt
     - ./.env:/opt/airflow/.env 
     - ./Backend:/opt/airflow/Backend
-    - ./Rag_modelings:/opt/airflow/Rag_modelings
     - ./chroma_db:/opt/airflow/chroma_db
+    - ./Rag_modelings:/opt/airflow/Rag_modelings
+  networks:
+    - app-network
   user: "${AIRFLOW_UID:-50000}:0"
   depends_on:
     redis:
@@ -35,6 +36,29 @@ x-airflow-common:
       condition: service_healthy
 
 services:
+  fastapi-backend:
+    build:
+      context: .
+      dockerfile: ./Backend/Dockerfile
+    container_name: fastapi-backend
+    ports:
+      - "8000:8000"  
+    volumes:
+      - ./Backend:/app
+      - ./chroma_db:/app/chroma_db
+      - ./uploads:/app/uploads
+      - ./user_markdowns:/app/user_markdowns
+      - ./Rag_modelings:/app/Rag_modelings
+      - ./.env:/app/.env
+    networks:
+      - app-network
+    restart: always
+    depends_on:
+      - redis
+      - postgres
+    environment:
+      - PYTHONPATH=/app
+
   postgres:
     image: postgres:13
     container_name: airflow-postgres
@@ -130,8 +154,10 @@ services:
           --lastname User \
           --role Admin \
           --email admin@example.com
-        echo "Installing additional dependencies..."
-        pip install --no-cache-dir -r /tmp/requirements.txt
+        echo "Verifying package installation..."
+        pip list | grep sentence
+        pip list | grep pinecone
+        pip list | grep selenium
         echo "Airflow Initialization Complete!"
     environment:
       <<: *airflow-common-env
@@ -140,7 +166,6 @@ services:
     restart: on-failure  # Prevents infinite restart loop
     volumes:
       - ./Airflow:/sources
-      - ./requirements.txt:/tmp/requirements.txt  # Mounts requirements.txt for installation
 
   airflow-cli:
     <<: *airflow-common
@@ -157,3 +182,7 @@ services:
 
 volumes:
   postgres-db-volume:
+
+networks:
+  app-network:
+    driver: bridge

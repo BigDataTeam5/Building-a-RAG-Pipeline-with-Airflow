@@ -5,6 +5,7 @@ from dotenv import load_dotenv
 import os
 import sys
 from pinecone import Pinecone, ServerlessSpec
+from sentence_transformers import SentenceTransformer
 from openai import OpenAI
 import numpy as np
 import tiktoken
@@ -13,6 +14,7 @@ from pathlib import Path
 import nltk
 import time
 from nltk.corpus import stopwords
+_sentence_transformer_model = None
 
 import logging
 from chunking_evaluation.chunking import (
@@ -31,7 +33,12 @@ except LookupError:
 # load english stopwords from nltk
 STOPWORDS = set(stopwords.words("english"))
 STOPWORDS.update(['would', 'could', 'should', 'might', 'many', 'much'])
-
+def get_sentence_transformer():
+    """Get or initialize the SentenceTransformer model"""
+    global _sentence_transformer_model
+    if _sentence_transformer_model is None:
+        _sentence_transformer_model = SentenceTransformer("all-MiniLM-L6-v2")
+    return _sentence_transformer_model
 
 
 def character_based_chunking(text, chunk_size=400, overlap=50):
@@ -240,7 +247,7 @@ def get_or_create_connections(similarity_metric="cosine", file_name=None, namesp
                 
             pc.create_index(
                 name=index_name,
-                dimension=1536,  # Matches text-embedding-ada-002 dimension
+                dimension=384,  # Matches text-embedding-ada-002 dimension
                 metric=metric,
                 spec=ServerlessSpec(
                     cloud='aws',
@@ -450,14 +457,10 @@ def get_embedding(text: str, client):
         # Ensure text doesn't exceed token limit
         truncated_text = truncate_text_to_token_limit(text)
         
-        if len(truncated_text) < len(text):
-            logger.warning(f"Text truncated from {len(text)} chars to {len(truncated_text)} chars for embedding")
+        model = get_sentence_transformer()
+        embedding = model.encode(truncated_text).tolist()
         
-        response = client.embeddings.create(
-            model="text-embedding-ada-002",
-            input=[truncated_text]
-        )
-        return response.data[0].embedding
+        return embedding
     except Exception as e:
         logger.error(f"Error generating embedding: {str(e)}")
         raise
@@ -466,13 +469,8 @@ def get_embedding(text: str, client):
 def get_query_embedding(query_text, client):
     """Generate embedding for the query text"""
     try:
-        logger.info(f"Generating embedding for query: {query_text[:100]}...")
-        response = client.embeddings.create(
-            model="text-embedding-ada-002",
-            input=[query_text]
-        )
-        embedding = response.data[0].embedding
-        logger.info(f"Generated embedding with dimension: {len(embedding)}")
+        model = get_sentence_transformer()
+        embedding = model.encode(query_text).tolist()
         return embedding
     except Exception as e:
         logger.error(f"Error generating query embedding: {str(e)}")

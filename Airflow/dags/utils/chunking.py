@@ -1,4 +1,3 @@
-from sentence_transformers import SentenceTransformer
 import re
 import numpy as np
 
@@ -7,11 +6,14 @@ class KamradtModifiedChunker:
         self.avg_chunk_size = avg_chunk_size
         self.min_chunk_size = min_chunk_size
         self.embedding_function = embedding_function
-        
-        # If no embedding function provided, use SentenceTransformer
-        if self.embedding_function is None:
-            model = SentenceTransformer("all-MiniLM-L6-v2")
-            self.embedding_function = lambda texts: [model.encode(text).tolist() for text in texts]
+        self._model = None
+    
+    def _get_default_embedding_function(self):
+        # Lazy-load SentenceTransformer only when needed
+        if self._model is None:
+            from sentence_transformers import SentenceTransformer
+            self._model = SentenceTransformer("all-MiniLM-L6-v2")
+        return lambda texts: [self._model.encode(text).tolist() for text in texts]
     
     def split_text(self, text):
         # Initial text splitting based on paragraphs

@@ -1,0 +1,65 @@
+# Airflow logs (main problematic directory)
+**/Airflow/logs/**
+
+# Python cache files
+**/__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Frontend-related files (not needed for backend)
+Frontend/
+streamlit_app/
+*streamlit*.py
+**/node_modules/
+*.html
+*.css
+*.jsx
+*.tsx
+
+# IDE and system files
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+
+# Distribution / packaging
+dist/
+build/
+*.egg-info/
+.git
+.github
+.gitignore
+
+# Large files and models
+*.csv
+*.xlsv
+*.pickle
+*.pkl
+*.pt
+*.pth
+*.bin
+
+# Documentation
+docs/
+LICENSE
+
+# Keep essential directories and files
+!Backend/
+!chroma_db/
+!uploads/
+!user_markdowns/
+!Rag_modelings/
+!.env
+!requirements.txt
+!poetry.lock
+!pyproject.toml
+
+# Logs (except essential ones)
+logs/
+*.log

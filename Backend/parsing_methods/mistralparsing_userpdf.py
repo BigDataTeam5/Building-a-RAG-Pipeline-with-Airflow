@@ -13,13 +13,13 @@ from mistralai.models import OCRResponse
 import os
 from dotenv import load_dotenv
 
-load_dotenv()
+load_dotenv(override=True)
 
 try:    
     # Option 1: Load API key from .env file
-    api_key = os.getenv("MISTRAL_API_KEY")
+    api_key = os.getenv("Mistral_API_KEY")
     if not api_key:
-        raise ValueError("MISTRAL_API_KEY not found in environment variables")
+        raise ValueError("Mistral_API_KEY not found in environment variables")
 except Exception as e:
     print(f"Error loading API key: {str(e)}")
     exit(1)

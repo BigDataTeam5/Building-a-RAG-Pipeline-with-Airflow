@@ -170,8 +170,10 @@ def chunk_document(text, chunking_strategy):
 
 
 
-def create_or_clear_collection(client, collection_name: str, embedding_dim: int) -> Any:
-    """Create or clear a ChromaDB collection."""
+def create_or_clear_collection(client, collection_name, embedding_dim=None):
+    """
+    Create a new collection or clear an existing one based on similarity metric
+    """
     # Try to delete existing collection
     try:
         client.delete_collection(collection_name)
@@ -181,10 +183,11 @@ def create_or_clear_collection(client, collection_name: str, embedding_dim: int)
     
     # Create new collection
     metadata = {
-        "description": "NVIDIA markdown documents",
+        "description": "Document embeddings collection",
         "last_refresh": time.strftime("%Y-%m-%d %H:%M:%S")
     }
     
+    # Create the collection
     collection = client.create_collection(
         name=collection_name,
         metadata=metadata
@@ -194,18 +197,12 @@ def create_or_clear_collection(client, collection_name: str, embedding_dim: int)
 def store_chunks_in_chromadb(
     chunks: List[str], 
     source_info: Dict[str, Any],
-    embedding_model_name: str = "all-MiniLM-L6-v2"
+    embedding_model_name: str = "all-MiniLM-L6-v2",
+    collection_name: str = None,
+    similarity_metric: str = "cosine"
 ) -> Tuple[str, int]:
     """
-    Store chunks in ChromaDB.
-    
-    Args:
-        chunks: List of text chunks
-        source_info: Dictionary with source information
-        embedding_model_name: Name of embedding model to use
-        
-    Returns:
-        Tuple of collection name and number of chunks stored
+    Store chunks in ChromaDB with specified similarity metric
     """
     # Initialize embedding model
     model = SentenceTransformer(EMBEDDING_MODELS[embedding_model_name])
@@ -217,11 +214,12 @@ def store_chunks_in_chromadb(
     # Set up ChromaDB
     client = chromadb.PersistentClient(path=CHROMA_DB_PATH)
     
-    # Use a single collection
-    collection_name = COLLECTION_NAME
+    # Use specified collection name or default
+    if collection_name is None:
+        collection_name = f"chromadb_embeddings_{similarity_metric.lower()}"
     
     # Create or clear the collection
-    collection = create_or_clear_collection(client, collection_name, embedding_dim)
+    collection = create_or_clear_collection(client, collection_name)
     
     # Generate IDs and metadata
     file_name = source_info.get("file_name", "unknown")
@@ -233,7 +231,8 @@ def store_chunks_in_chromadb(
             "chunk_index": i,
             "year": source_info.get("year", "unknown"),
             "quarter": source_info.get("quarter", "unknown"),
-            "embedding_model": embedding_model_name
+            "embedding_model": embedding_model_name,
+            "similarity_metric": similarity_metric
         }
         for i in range(len(chunks))
     ]
@@ -295,19 +294,12 @@ def store_markdown_in_chromadb(
     markdown_content: str,
     chunking_strategy: str = "Semantic Chuking(Kamradt Method)",
     embedding_model_name: str = "all-MiniLM-L6-v2",
-    source_info: Optional[Dict[str, Any]] = None
+    source_info: Optional[Dict[str, Any]] = None,
+    similarity_metric: str = "cosine",
+    data_source: str = "Nvidia Dataset"
 ) -> Dict[str, Any]:
     """
-    Process markdown content, chunk it, and store in ChromaDB.
-    
-    Args:
-        markdown_content: Markdown content to process
-        chunking_strategy: Chunking strategy to use
-        embedding_model_name: Embedding model to use
-        source_info: Source information (file name, path, etc.)
-        
-    Returns:
-        Dictionary with chunking and storage information
+    Process markdown content, chunk it, and store in ChromaDB with specified similarity metric
     """
     # Default source info if not provided
     if source_info is None:
@@ -324,12 +316,17 @@ def store_markdown_in_chromadb(
         chunks = chunk_document(markdown_content, chunking_strategy)
         print(f"Created {len(chunks)} chunks")
         
-        # Step 2: Store chunks in ChromaDB
-        print(f"Storing chunks in ChromaDB...")
+        # Step 2: Generate collection name based on data source and similarity metric
+        collection_name = get_collection_name(data_source, similarity_metric)
+        print(f"Using collection: {collection_name}")
+        
+        # Step 3: Store chunks in ChromaDB with the appropriate collection name
         collection_name, num_stored = store_chunks_in_chromadb(
             chunks, 
             source_info, 
-            embedding_model_name
+            embedding_model_name,
+            collection_name=collection_name,
+            similarity_metric=similarity_metric
         )
         
         return {
@@ -339,7 +336,8 @@ def store_markdown_in_chromadb(
             "chunks_stored": num_stored,
             "source_info": source_info,
             "chunking_strategy": chunking_strategy,
-            "embedding_model": embedding_model_name
+            "embedding_model": embedding_model_name,
+            "similarity_metric": similarity_metric
         }
     
     except Exception as e:
@@ -351,6 +349,20 @@ def store_markdown_in_chromadb(
             "collection_name": None
         }
 
+
+def get_collection_name(data_source, similarity_metric):
+    """
+    Generate collection name based on data source and similarity metric
+    """
+    # Normalize similarity metric name
+    metric = similarity_metric.lower().replace(" ", "_").replace("-", "_")
+    
+    # Base collection name from data source
+    base_name = "nvidia_embeddings" if data_source == "Nvidia Dataset" else "user_pdf_embeddings"
+    
+    # Append similarity metric to create unique collection name
+    return f"{base_name}_{metric}"
+
 def query_and_generate_response(
     query: str,
     similarity_metric: str = "cosine",
@@ -361,156 +373,166 @@ def query_and_generate_response(
     quarters: List[str] = None
 ) -> Dict[str, Any]:
     """
-    Retrieve relevant chunks from ChromaDB and generate a response.
-    
-    Args:
-        query: Query to answer
-        similarity_metric: Similarity metric to use
-        embedding_model_name: Embedding model to use
-        llm_model: LLM model to use for response generation
-        top_k: Number of chunks to retrieve
-        data_source: Source of data (e.g., "Nvidia Dataset")
-        quarters: List of quarters to filter by (e.g., ["2020Q1", "2021Q3"])
-        
-    Returns:
-        Dictionary with response and metadata
+    Process a query using RAG with ChromaDB backend
     """
     try:
-        # Step 1: Determine which collection to use
-        collection_name = "nvidia_embeddings" if data_source == "Nvidia Dataset" else COLLECTION_NAME
+        # Set up ChromaDB client
+        CHROMA_DB_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), "chroma_db")
+        client = chromadb.PersistentClient(path=CHROMA_DB_PATH)
+        
+        # Determine which collection to use
+        collection_name = "nvidia_embeddings" if data_source == "Nvidia Dataset" else "user_pdf_embeddings"
         print(f"Using collection: {collection_name} for data source: {data_source}")
         
+        # Get collection with proper error handling
+        try:
+            collection = client.get_collection(name=collection_name)
+        except Exception as e:
+            print(f"Error getting collection {collection_name}: {str(e)}")
+            return {
+                "response": f"Error: Collection {collection_name} not found. Please check your data source selection.",
+                "chunks_retrieved": 0,
+                "sources": []
+            }
+            
         # Initialize embedding model
-        model = SentenceTransformer(EMBEDDING_MODELS[embedding_model_name])
+        model = SentenceTransformer(embedding_model_name)
         
         # Generate query embedding
         query_embedding = model.encode(query).tolist()
         
-        # Set up ChromaDB client
-        client = chromadb.PersistentClient(path=CHROMA_DB_PATH)
+        # Debug: Print selected quarters
+        print(f"Selected quarters from UI: {quarters}")
         
-        try:
-            # Get collection
-            collection = client.get_collection(name=collection_name)
-            
-            # Prepare where clause for filtering if using Nvidia dataset
-            where_filter = None
-            if data_source == "Nvidia Dataset" and quarters:
-                # Parse quarters into year and quarter components
-                where_conditions = []
-                for quarter_str in quarters:
-                    # Handle different possible formats (2020Q1, 2020q1, 2020-Q1)
-                    quarter_str = quarter_str.upper().replace('-', '')
-                    if 'Q' in quarter_str:
-                        year, quarter = quarter_str.split('Q')
-                    else:
-                        # Format like 2020q1
-                        year = quarter_str[:4]
-                        quarter = f"Q{quarter_str[5:]}"
-                    
-                    where_conditions.append({
-                        "$and": [
-                            {"Year": year},
-                            {"Quarter": f"Q{quarter}"}
-                        ]
-                    })
-                
-               # FIX: Handle single condition differently
-                if len(where_conditions) == 1:
-                    # Use the single condition directly without $or
-                    where_filter = where_conditions[0]
-                    print(f"Applying single filter: {where_filter}")
-                elif len(where_conditions) > 1:
-                    # Use $or for multiple conditions
-                    where_filter = {"$or": where_conditions}
-                    print(f"Applying multi-filter: {where_filter}")
-            
-            # Query collection with filtering by quarters if needed
-            if where_filter:
-                results = collection.query(
-                    query_embeddings=[query_embedding],
-                    n_results=top_k,
-                    include=["documents", "metadatas", "distances"],
-                    where=where_filter
-                )
-            else:
-                results = collection.query(
-                    query_embeddings=[query_embedding],
-                    n_results=top_k,
-                    include=["documents", "metadatas", "distances"]
-                )
-            
-            chunks = results["documents"][0]
-            metadatas = results["metadatas"][0]
-            distances = results["distances"][0]
-            
-            # Add distance score to metadata
-            for i, metadata in enumerate(metadatas):
-                metadata["similarity_score"] = float(distances[i])
-                metadata["similarity_metric_used"] = similarity_metric
-            
-            if not chunks:
-                return {
-                    "response": "No relevant information found for your query in the selected quarters.",
-                    "chunks_retrieved": 0,
-                    "sources": []
-                }
-                
-            # Step 2: Generate response using LiteLLM
-            print(f"Generating response using {llm_model} with {len(chunks)} chunks...")
-            
-            # Use generate_response function from litellm_query_generator
-            llm_response = generate_response(
-                chunks=chunks,
-                query=query,
-                model_id=llm_model,
-                metadata=metadatas
+        # Build where clause for filtering if using Nvidia dataset and quarters are specified
+        where_conditions = None
+        if data_source == "Nvidia Dataset" and quarters:
+            # First query a sample to determine field names
+            sample_results = collection.query(
+                query_embeddings=[query_embedding],
+                n_results=1,
+                include=["metadatas"]
             )
             
-            # Extract response and usage information
-            response_content = llm_response.get("answer", "Error generating response")
-            token_usage = llm_response.get("usage", {})
+            # Auto-detect field names from actual metadata
+            metadata_sample = {}
+            if sample_results["metadatas"] and len(sample_results["metadatas"]) > 0 and len(sample_results["metadatas"][0]) > 0:
+                metadata_sample = sample_results["metadatas"][0][0]
+                print(f"Sample metadata from ChromaDB: {metadata_sample}")
             
-            # Format sources for response
-            sources = []
-            for i, metadata in enumerate(metadatas):
-                source_info = {
-                    "source": metadata.get("source", "Unknown"),
-                    "similarity": metadata.get("similarity_score", 0.0),
-                    "document": f"{metadata.get('file_name', 'Unknown')}",
-                    "year": metadata.get("year", "Unknown"),
-                    "quarter": metadata.get("quarter", "Unknown"),
-                    "text": chunks[i][:200] + "..." if len(chunks[i]) > 200 else chunks[i]
-                }
-                sources.append(source_info)
+            # Detect correct field names (handle both upper and lowercase keys)
+            year_field = "Year" if "Year" in metadata_sample else "year"
+            quarter_field = "Quarter" if "Quarter" in metadata_sample else "quarter"
+            print(f"Using metadata fields: {year_field} and {quarter_field}")
             
-            # Prepare final response
-            result = {
-                "response": response_content,
-                "chunks_retrieved": len(chunks),
-                "sources": sources,
-                "token_usage": token_usage,
-                "collection_used": collection_name
-            }
+            # Normalize quarters and build where conditions
+            where_conditions = []
+            for quarter_str in quarters:
+                # Normalize quarter format (handle both 2023Q3 and 2023q3 formats)
+                quarter_str = quarter_str.upper().replace('-', '')
+                
+                if 'Q' in quarter_str:
+                    year, quarter = quarter_str.split('Q')
+                    quarter = f"Q{quarter}"  # Make sure quarter has Q prefix
+                else:
+                    year = quarter_str[:4]
+                    quarter = f"Q{quarter_str[4:]}"
+                
+                print(f"Adding filter for {year_field}={year}, {quarter_field}={quarter}")
+                
+                # Use the correct field names in the filter
+                where_conditions.append({
+                    "$and": [
+                        {year_field: year},
+                        {quarter_field: quarter}
+                    ]
+                })
             
-            return result
+            # Combine with OR for any quarter match
+            if where_conditions:
+                where_conditions = {"$or": where_conditions}
+                print(f"Applying multi-filter: {where_conditions}")
         
-        except Exception as e:
-            print(f"Error retrieving from collection {collection_name}: {e}")
+        # Execute query with or without filters
+        if where_conditions:
+            result = collection.query(
+                query_embeddings=[query_embedding],
+                n_results=top_k,
+                where=where_conditions,
+                include=["documents", "metadatas", "distances"]
+            )
+        else:
+            result = collection.query(
+                query_embeddings=[query_embedding],
+                n_results=top_k,
+                include=["documents", "metadatas", "distances"]
+            )
+        
+        # Check if we have results
+        if not result["documents"] or not result["documents"][0]:
+            no_results_msg = "No relevant information found."
+            if quarters:
+                quarters_str = ", ".join(quarters)
+                no_results_msg += f" Try selecting different quarters (current selection: {quarters_str})."
+            
             return {
-                "response": f"Error retrieving information: {str(e)}",
+                "response": no_results_msg,
                 "chunks_retrieved": 0,
                 "sources": []
             }
-    
+        
+        # Process retrieved chunks
+        chunks = result["documents"][0]
+        metadatas = result["metadatas"][0] if result["metadatas"] else []
+        
+        # Generate response with LLM
+        chunk_context = "\n\n".join([f"CHUNK {i+1}:\n{chunk}" for i, chunk in enumerate(chunks)])
+        
+        # Use LiteLLM or another method to generate the response
+        prompt = f"""Answer the question based ONLY on the following context:
+
+{chunk_context}
+
+Question: {query}
+        
+Provide a comprehensive answer using the information in the context. If the context doesn't contain relevant information, simply state "I don't have enough information to answer this question."
+"""
+        
+        # Generate response using your preferred LLM method
+        response_content, token_usage = generate_response(prompt, model_id=llm_model)
+        
+        # Compile source information
+        sources = []
+        for i, metadata in enumerate(metadatas):
+            source = {
+                "text": chunks[i][:150] + "..." if len(chunks[i]) > 150 else chunks[i],
+                "file": metadata.get("file_name", "Unknown"),
+                "year": metadata.get("year", metadata.get("Year", "Unknown")),
+                "quarter": metadata.get("quarter", metadata.get("Quarter", "Unknown")),
+            }
+            sources.append(source)
+        
+        # Prepare final response
+        result = {
+            "response": response_content,
+            "chunks_retrieved": len(chunks),
+            "sources": sources,
+            "token_usage": token_usage,
+            "collection_used": collection_name
+        }
+        
+        return result
+        
     except Exception as e:
         print(f"Error in RAG pipeline: {e}")
+        import traceback
+        traceback.print_exc()
         return {
             "response": f"Error processing your query: {str(e)}",
             "chunks_retrieved": 0,
             "sources": []
         }
-    
+        
 # For testing
 if __name__ == "__main__":
     import argparse

@@ -10,6 +10,7 @@ import re
 
 # Streamlit UI
 st.set_page_config(page_title="Nvidia Quarterly data RAG", layout="wide")
+current_page = st.query_params.get("page", "main")
 
 if "show_token_usage" not in st.session_state:
     st.session_state.show_token_usage = False
@@ -37,6 +38,8 @@ if "selected_quarters" not in st.session_state:
     st.session_state.selected_quarters = []
 if "namespace" not in st.session_state:
     st.session_state.namespace = None
+if "embedding_response" not in st.session_state:
+    st.session_state.embedding_response = {}
 
 # FastAPI Base URL - Simple configuration
 if "fastapi_url" not in st.session_state:
@@ -116,20 +119,30 @@ def submit_rag_query(question, model, quarters=None, json_path=None):
                 "namespace": st.session_state.get("namespace"),
                 "json_path": json_path
             }
-        elif st.session_state.rag_method.lower() == "chromadb" and quarters:
-            payload = {
-                "query": question,
-                "rag_method": "chromadb",
-                "model_id": model,
-                "data_source": st.session_state.data_source,
-                "quarters": quarters
-            }
+        elif st.session_state.rag_method.lower() == "chromadb":
+            if st.session_state.data_source == "Nvidia Dataset" and quarters:
+                
+                payload = {
+                    "query": question,
+                    "rag_method": "chromadb",
+                    "model_id": model,
+                    "data_source": st.session_state.data_source,
+                    "quarters": quarters
+                }
+            else:
+                payload = {
+                    "query": question,
+                    "rag_method": "chromadb",
+                    "model_id": model,
+                    "data_source": st.session_state.data_source,
+                    "json_path": json_path
+                }
         elif st.session_state.rag_method.lower() == "manual_embedding":
             payload = {
                 "query": question,
                 "rag_method": "manual_embedding",
                 "model_id": model,
-                "embedding_id": "direct_query"
+                "embedding_id": st.session_state.get("manual_embedding_id","direct_query")
             }
         else:
             payload = {
@@ -148,13 +161,11 @@ def submit_rag_query(question, model, quarters=None, json_path=None):
         if response.status_code == 200:
             result = response.json()
             
-            # If we have a query_job_id, poll for the result
             if "query_job_id" in result:
                 st.info("Query is being processed in the background. Please wait...")
                 final_result = poll_for_query_status(result["query_job_id"])
                 return final_result
             else:
-                # For backward compatibility with direct responses
                 return result
         else:
             st.error(f"Failed to submit query: {response.text}")
@@ -177,6 +188,8 @@ def fetch_available_models():
     except Exception as e:
         st.warning(f"Error fetching models: {str(e)}")
         return ["gpt-3.5-turbo"]  # Default fallback model
+    
+
 
 
 def poll_for_query_status(query_job_id, interval=1):
@@ -577,220 +590,114 @@ with st.sidebar:
         if data_source == "Select an option":
             st.error("Please select a data source")
         elif data_source == "PDF Upload":
-            if pdf_parser == "Select a parser":
-                st.error("Please select a PDF parser")
-            elif rag_method == "Select a method":
-                st.error("Please select a RAG method")
-            elif chunking_strategy == "Select a strategy":
-                st.error("Please select a chunking strategy")
-            elif llm_model == "Select Model":
-                st.error("Please select an LLM model")
+            if any(val == None or "Select" in str(val) for val in [
+                st.session_state.pdf_parser, 
+                st.session_state.rag_method, 
+                st.session_state.chunking_strategy, 
+                st.session_state.llm_model
+            ]):
+                st.error("Please select all configuration options")
             else:
-                st.success("Configuration applied successfully")
                 st.session_state.next_clicked = True
-                st.rerun()
+                st.success("Configuration applied successfully")
         elif data_source == "Nvidia Dataset" and not selected_quarters:
             st.error("Please select at least one quarter")
         else:
-            st.success("Configuration applied successfully")
             st.session_state.next_clicked = True
-            st.rerun()
+            st.success("Configuration applied successfully")
     st.markdown("---")
     st.subheader("Analytics")
     if st.button("📊 View Token Usage"):
-        st.session_state.show_token_usage = True
-        st.rerun()
-    
+        st.query_params["page"] = "token_usage"
 
-# Main Page Logic
-st.title("📄 RAG Pipeline with Airflow")
-
-if st.session_state.get("next_clicked", False):
-    if st.session_state.data_source == "PDF Upload":
-        st.header("Upload PDF Document")
-        
-        # Display file uploader
-        uploaded_file = st.file_uploader("Upload a PDF File:", type=["pdf"], key="pdf_uploader")
-        if uploaded_file:
-            st.session_state.file_uploaded = True
-            upload_response = upload_pdf(uploaded_file)
-            if "error" not in upload_response:
-                st.success("✅ PDF File Uploaded Successfully!")
-                st.info("The document will be processed through the RAG pipeline with your selected configuration.")
-                
-                # Display embedding button after successful upload
-                if "file_id" in upload_response and "markdown_path" in upload_response:
-                    file_id = upload_response["file_id"]
-                    markdown_path = upload_response["markdown_path"]
-                    markdown_filename = upload_response["markdown_filename"]
-                    
-    
-                if st.button("Process Chunking & Create Embeddings"):
-                    
-                    embedding_response = process_rag_embeddings(
-                        file_id, 
-                        markdown_path,
-                        markdown_filename,
-                        st.session_state.rag_method,
-                        st.session_state.chunking_strategy,
-                        similarity_metric
-                    )
-                    
-                    if "error" not in embedding_response:
-                        # Get the job ID from the response
-                        job_id = embedding_response.get("job_id")
-                        if job_id:
-                            final_result = poll_for_embedding_status(job_id)
-                            
-                            if final_result and final_result.get("status") == "completed":
-                                st.success("✅ Embeddings created successfully!")
-                                namespace = markdown_filename.lower().replace(" ", "-").replace(".", "-")
-                                st.info(f"Your document was indexed in namespace: **{namespace}**")                             
-                                
-                                st.session_state.embedding_job_id = job_id
-                            else:
-                                st.error("Failed to create embeddings. Please try again.")
-                        else:
-                            st.error("No job ID returned from the embedding creation process.")
-                    else:
-                        st.error(f"Embedding failed: {embedding_response.get('error')}")    
-
-    elif st.session_state.data_source == "Nvidia Dataset":
-        st.header("Query Nvidia Quarterly Reports")
-        
-        # Display selected configuration
-        st.subheader("Current Configuration:")
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            st.info(f"**PDF Parser:** {st.session_state.pdf_parser}")
-        with col2:
-            st.info(f"**RAG Method:** {st.session_state.rag_method}")
-        with col3:
-            st.info(f"**Chunking Strategy:** {st.session_state.chunking_strategy}")
-        
-        # Display selected quarters
-        st.subheader("Selected Quarters:")
-        if st.session_state.selected_quarters:
-            quarters_display = ", ".join(st.session_state.selected_quarters)
-            st.info(f"Querying data from: **{quarters_display}**")
-        else:
-            st.warning("No quarters selected. Please select at least one quarter in the sidebar.")
-        
-    # Question and answer section (common for both data sources)
-    if ((st.session_state.data_source == "PDF Upload" and st.session_state.file_uploaded) or 
-        (st.session_state.data_source == "Nvidia Dataset" and st.session_state.selected_quarters)):
-        
-        st.markdown("---")
-        st.subheader("Ask Questions About the Data")
-        # Similarity metric selection
-        
-        st.session_state.similarity_metric = similarity_metric
-        
-        user_question = st.text_area(
-            "Enter your question:",
-            placeholder="Example: What was Nvidia's revenue in Q2 2023?",
-            key="rag_question"
-        )
-        
-        if st.button("Submit Query", type="primary"):
-            if not user_question:
-                st.error("Please enter a question.")
-            else:
-                # Submit RAG query using selected configuration
-                quarters = st.session_state.selected_quarters if st.session_state.data_source == "Nvidia Dataset" else None
-                json_path = st.session_state.get("json_path")
-                result = submit_rag_query(
-                    question=user_question, 
-                    model=st.session_state.llm_model, 
-                    quarters=quarters,
-                    json_path=json_path
-                    )
-                
-                if result:
-                    # Display the answer
-                    st.session_state.question_result = result
-                    
-                    # Show the answer with citations
-                    st.markdown("### Answer")
-                    answer_text = result.get("answer") or result.get("response") or "No answer available"
-                    st.markdown(answer_text)
-                    
-                    # Show source documents and match information
-                    if "matches" in result:
-                        with st.expander("Source Documents & Match Information", expanded=False):
-                            for idx, match in enumerate(result["matches"]):
-                                st.markdown(f"### Match {idx+1}")
-                                
-                                # Display match score
-                                st.markdown(f"**Similarity Score:** {match.get('score', 'N/A'):.4f}")
-                                
-                                # Display metadata
-                                metadata = match.get('metadata', {})
-                                if metadata:
-                                    st.markdown("**Metadata:**")
-                                    col1, col2 = st.columns(2)
-                                    with col1:
-                                        st.markdown(f"- File: `{metadata.get('file_name', 'Unknown')}`")
-                                        st.markdown(f"- Chunk Index: `{metadata.get('chunk_index', 'N/A')}`")
-                                    with col2:
-                                        st.markdown(f"- Length: `{metadata.get('original_length', 'N/A')}`")
-                                
-                                # Display text preview
-                                if 'text_preview' in metadata:
-                                    st.markdown("**Text Preview:**")
-                                    st.markdown("""```text
-{}```""".format(metadata['text_preview'].strip()))
-                                
-                                st.markdown("---")
-
-# Token usage display
-if st.session_state.show_token_usage:
+if current_page == "token_usage":
+    # Token usage page
     st.title("📊 Token Usage Analytics")
-    if st.button("🔙 Go Back"):
-        st.session_state.show_token_usage = False
-        st.rerun()
+    
+    # Back button using query params
+    if st.button("🔙 Back to Main Page"):
+        st.query_params["page"] = "main"
+        
     st.markdown("### Token Usage History")
     if "token_usage_records" not in st.session_state:
         st.session_state.token_usage_records = []
+        
     if hasattr(st.session_state, "question_result") and st.session_state.question_result:
         result = st.session_state.question_result
-        usage_data = result.get("usage", {})
         
-        # extract usage data if available 
+        # Extract usage data with better error handling
+        usage_data = {}
+        
+        # Handle different response formats
         if "usage" in result:
+            usage_data = result.get("usage", {})
+            
+            # Handle string format (JSON string)
             if isinstance(usage_data, str):
                 try:
                     usage_data = json.loads(usage_data)
-                except:
-                    usage_data = {"prompt_tokens": 0, "completion_tokens": 0,"total_tokens": 0}
-            # Calculate costs based on the model
-            model_id = result.get("model_id", "gpt-3.5-turbo")
-            cost_data = calculate_token_cost(model_id, usage_data)
-
-            #Create a timestamp if not present
-            if "timestamp" not in result:
-                result["timestamp"] = time.strftime("%Y-%m-%d %H:%M:%S")
-            #Add to usage records if not already there 
-            query_id = result.get("job_id", str(uuid.uuid4()))
-
-            # Check if this exact query is already recorded
-            if not any(record.get("job_id") == query_id for record in st.session_state.token_usage_records):
-                st.session_state.token_usage_records.append({
-                    "job_id": query_id,
-                    "task_type": "RAG Query",
-                    "query": result.get("query", "")[:30] + "..." if len(result.get("query", "")) > 30 else result.get("query", ""),
-                    "model": model_id,
-                    "prompt_tokens": usage_data.get("prompt_tokens", 0),
-                    "completion_tokens": usage_data.get("completion_tokens", 0),
-                    "total_tokens": usage_data.get("total_tokens", 0),
-                    "cost": cost_data["total_cost"],
-                    "timestamp": result["timestamp"]
-                })
-# Display usage statistics
+                except json.JSONDecodeError:
+                    st.warning("Could not parse usage data")
+                    usage_data = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+            
+            # Handle missing fields
+            if "prompt_tokens" not in usage_data or "completion_tokens" not in usage_data:
+                # Try to estimate from content if available
+                if "answer" in result and result["answer"]:
+                    answer_length = len(result["answer"])
+                    estimated_tokens = answer_length // 4  # Rough estimate of tokens
+                    
+                    if "prompt_tokens" not in usage_data:
+                        usage_data["prompt_tokens"] = estimated_tokens * 4  # Typical prompt/completion ratio
+                    
+                    if "completion_tokens" not in usage_data:
+                        usage_data["completion_tokens"] = estimated_tokens
+                    
+                    if "total_tokens" not in usage_data:
+                        usage_data["total_tokens"] = usage_data.get("prompt_tokens", 0) + usage_data.get("completion_tokens", 0)
+        
+        # If we still have no usage data, create default values with warning
+        if not usage_data:
+            st.warning("No token usage data available. Using estimated values.")
+            # Set default values based on length of response
+            answer_text = result.get("answer", "No answer")
+            usage_data = {
+                "prompt_tokens": max(len(result.get("query", "")) // 3, 10),
+                "completion_tokens": len(answer_text) // 4,
+                "total_tokens": (len(result.get("query", "")) // 3) + (len(answer_text) // 4)
+            }
+    
+        # Calculate costs based on the model - MOVED INSIDE IF BLOCK
+        model_id = result.get("model_id", "gpt-3.5-turbo")
+        cost_data = calculate_token_cost(model_id, usage_data)
+        
+        # Create a timestamp if not present - MOVED INSIDE IF BLOCK
+        if "timestamp" not in result:
+            result["timestamp"] = time.strftime("%Y-%m-%d %H:%M:%S")
+            
+        # Add to usage records if not already there - MOVED INSIDE IF BLOCK
+        query_id = result.get("job_id", str(uuid.uuid4()))
+        
+        # Check if this exact query is already recorded - MOVED INSIDE IF BLOCK
+        if not any(record.get("job_id") == query_id for record in st.session_state.token_usage_records):
+            st.session_state.token_usage_records.append({
+                "job_id": query_id,
+                "task_type": "RAG Query",
+                "query": result.get("query", "")[:30] + "..." if len(result.get("query", "")) > 30 else result.get("query", ""),
+                "model": model_id,
+                "prompt_tokens": usage_data.get("prompt_tokens", 0),
+                "completion_tokens": usage_data.get("completion_tokens", 0),
+                "total_tokens": usage_data.get("total_tokens", 0),
+                "cost": cost_data["total_cost"],
+                "timestamp": result["timestamp"]
+            })
+    
+    # Display usage statistics
     if not st.session_state.token_usage_records:
         st.info("No token usage data available yet. Ask questions to see usage statistics.")
     else:
         # Calculate total tokens and cost
+        # This section doesn't use the result variable, so it's fine outside the if block
         total_tokens = sum(record["total_tokens"] for record in st.session_state.token_usage_records)
         total_cost = sum(record["cost"] for record in st.session_state.token_usage_records)
         prompt_tokens = sum(record["prompt_tokens"] for record in st.session_state.token_usage_records)
@@ -860,54 +767,235 @@ if st.session_state.show_token_usage:
                 
                 st.pyplot(fig)
             except Exception as e:
-                st.warning(f"Could not generate charts: {str(e)}")    
+                st.warning(f"Could not generate charts: {str(e)}")
 
+else:  # current_page == "main" or any other value
+    # Regular main page content
+    st.title("📄 RAG Pipeline with Airflow")
 
-if not st.session_state.get("next_clicked", False):
-    # Main landing page
-    st.header("Welcome to the RAG Pipeline with Airflow")
-    st.markdown("""
-    This application lets you use a Retrieval-Augmented Generation (RAG) pipeline 
-    to query PDF documents or Nvidia's quarterly reports.
-    
-    ### Configuration Options:
-    
-    1. **Select your data source:**
-       - Upload your own PDF documents
-       - Query Nvidia quarterly reports from the past 5 years
-    
-    2. **Choose your PDF parsing method:**
-       - Basic Parser
-       - Docling
-       - Mistral OCR
-    
-    3. **Select RAG implementation:**
-       - Naive approach (Manual embeddings)
-       - Pinecone vector database
-       - ChromaDB vector database
-    
-    4. **Choose chunking strategy:**
-       - Fixed Size
-       - Semantic
-       - Recursive
-    
-    ### Get Started:
-    Configure your preferences in the sidebar and click "Apply Configuration".
-    """)
-    
-    # System architecture diagram (placeholder)
-    st.subheader("System Architecture")
-    st.markdown("""
-    ```
-    ┌─────────────┐    ┌─────────────┐    ┌─────────────┐
-    │  Streamlit  │───►│   FastAPI   │───►│   Airflow   │
-    │   (UI)      │◄───│  (Backend)  │◄───│  (Pipeline) │
-    └─────────────┘    └─────────────┘    └─────────────┘
-                            │                   │
-                            ▼                   ▼
-                       ┌─────────────┐    ┌─────────────┐
-                       │ LLM Service │    │ Vector DB   │
-                       │             │    │             │
-                       └─────────────┘    └─────────────┘
-    ```
-    """)
+    if st.session_state.get("next_clicked", False):
+        if st.session_state.data_source == "PDF Upload":
+            st.header("Upload PDF Document")
+            
+            # Display file uploader
+            uploaded_file = st.file_uploader("Upload a PDF File:", type=["pdf"], key="pdf_uploader")
+            if uploaded_file:
+                st.session_state.file_uploaded = True
+                upload_response = upload_pdf(uploaded_file)
+                if "error" not in upload_response:
+                    st.success("✅ PDF File Uploaded Successfully!")
+                    st.info("The document will be processed through the RAG pipeline with your selected configuration.")
+                    
+                    # Display embedding button after successful upload
+                    if "file_id" in upload_response and "markdown_path" in upload_response:
+                        file_id = upload_response["file_id"]
+                        markdown_path = upload_response["markdown_path"]
+                        markdown_filename = upload_response["markdown_filename"]
+                        
+        
+                    if st.button("Process Chunking & Create Embeddings"):
+                        with st.spinner("Processing embeddings..."):
+                            if st.session_state.rag_method == "manual_embedding":
+                                try:
+                                    with open(markdown_path, "r", encoding="utf-8") as f:
+                                        markdown_content = f.read()
+                                    
+                                    # Create a unique ID for this manual embedding
+                                    embedding_id = f"manual_{file_id}"
+                                    
+                                    # Call the manual embedding endpoint
+                                    manual_embed_response = requests.post(
+                                        st.session_state.RAG_MANUAL_EMBED_API,
+                                        json={
+                                            "text": markdown_content,
+                                            "embedding_id": embedding_id,
+                                            "rag_method": "manual_embedding",
+                                            "chunking_strategy": st.session_state.chunking_strategy,
+                                            "metadata": {
+                                                "file_name": markdown_filename,
+                                                "source": "pdf_upload"
+                                            }
+                                        }
+                                    )
+                                    
+                                    if manual_embed_response.status_code == 200:
+                                        result = manual_embed_response.json()
+                                        st.session_state.manual_embedding_id = embedding_id
+                                        st.session_state.embedding_response = {
+                                            "status": "completed",
+                                            "job_id": embedding_id,
+                                            "chunks_count": result.get('chunks_count', 0)
+                                        }
+                                        st.success("✅ Manual embeddings created successfully!")
+                                        st.info(f"Created {result.get('chunks_count', 0)} chunks in memory")
+                                    else:
+                                        st.session_state.embedding_response = {"error": manual_embed_response.text}
+                                        st.error(f"Manual embedding failed: {manual_embed_response.text}")
+                                except Exception as e:
+                                    st.session_state.embedding_response = {"error": str(e)}
+                                    st.error(f"Error creating manual embeddings: {str(e)}")
+                            else:
+                                # Original code for other RAG methods
+                                response = process_rag_embeddings(
+                                    file_id, 
+                                    markdown_path,
+                                    markdown_filename,
+                                    st.session_state.rag_method,
+                                    st.session_state.chunking_strategy,
+                                    similarity_metric
+                                )
+                                st.session_state.embedding_response = response
+                                
+                                # Handle polling for non-manual embeddings
+                                if "error" not in response:
+                                    job_id = response.get("job_id")
+                                    if job_id:
+                                        final_result = poll_for_embedding_status(job_id)
+                                        
+                                        if final_result and final_result.get("status") == "completed":
+                                            st.session_state.embedding_job_id = job_id
+                                            st.success("✅ Embeddings created successfully!")
+                                            namespace = markdown_filename.lower().replace(" ", "-").replace(".", "-")
+                                            st.info(f"Your document was indexed in namespace: **{namespace}**")
+                                        else:
+                                            st.error("Failed to create embeddings. Please try again.")
+                                    else:
+                                        st.error("No job ID returned from the embedding creation process.")
+                                elif response:  # Only show error if we have a response
+                                    st.error(f"Embedding failed: {response.get('error')}")
+
+        elif st.session_state.data_source == "Nvidia Dataset":
+            st.header("Query Nvidia Quarterly Reports")
+            
+            # Display selected configuration
+            st.subheader("Current Configuration:")
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                st.info(f"**PDF Parser:** {st.session_state.pdf_parser}")
+            with col2:
+                st.info(f"**RAG Method:** {st.session_state.rag_method}")
+            with col3:
+                st.info(f"**Chunking Strategy:** {st.session_state.chunking_strategy}")
+            
+            # Display selected quarters
+            st.subheader("Selected Quarters:")
+            if st.session_state.selected_quarters:
+                quarters_display = ", ".join(st.session_state.selected_quarters)
+                st.info(f"Querying data from: **{quarters_display}**")
+            else:
+                st.warning("No quarters selected. Please select at least one quarter in the sidebar.")
+            
+        # Question and answer section (common for both data sources)
+        if ((st.session_state.data_source == "PDF Upload" and st.session_state.file_uploaded) or 
+            (st.session_state.data_source == "Nvidia Dataset" and st.session_state.selected_quarters)):
+            
+            st.markdown("---")
+            st.subheader("Ask Questions About the Data")
+            # Similarity metric selection
+            
+            st.session_state.similarity_metric = similarity_metric
+            
+            user_question = st.text_area(
+                "Enter your question:",
+                placeholder="Example: What was Nvidia's revenue in Q2 2023?",
+                key="rag_question"
+            )
+            
+            if st.button("Submit Query", type="primary"):
+                if not user_question:
+                    st.error("Please enter a question.")
+                else:
+                    # Submit RAG query using selected configuration
+                    quarters = st.session_state.selected_quarters if st.session_state.data_source == "Nvidia Dataset" else None
+                    json_path = st.session_state.get("json_path")
+                    result = submit_rag_query(
+                        question=user_question, 
+                        model=st.session_state.llm_model, 
+                        quarters=quarters,
+                        json_path=json_path
+                        )
+                    
+                    if result:
+                        # Display the answer
+                        st.session_state.question_result = result
+                        
+                        # Show the answer with citations
+                        st.markdown("### Answer")
+                        answer_text = result.get("answer") or result.get("response") or "No answer available"
+                        st.markdown(answer_text)
+                        
+                        # Show source documents and match information
+                        if "matches" in result:
+                            with st.expander("Source Documents & Match Information", expanded=False):
+                                for idx, match in enumerate(result["matches"]):
+                                    st.markdown(f"### Match {idx+1}")
+                                    
+                                    # Display match score
+                                    st.markdown(f"**Similarity Score:** {match.get('score', 'N/A'):.4f}")
+                                    
+                                    # Display metadata
+                                    metadata = match.get('metadata', {})
+                                    if metadata:
+                                        st.markdown("**Metadata:**")
+                                        col1, col2 = st.columns(2)
+                                        with col1:
+                                            st.markdown(f"- File: `{metadata.get('file_name', 'Unknown')}`")
+                                            st.markdown(f"- Chunk Index: `{metadata.get('chunk_index', 'N/A')}`")
+                                        with col2:
+                                            st.markdown(f"- Length: `{metadata.get('original_length', 'N/A')}`")
+                                    
+                                    # Display text preview
+                                    if 'text_preview' in metadata:
+                                        st.markdown("**Text Preview:**")
+                                        st.markdown("""```text
+{}```""".format(metadata['text_preview'].strip()))
+                                    
+                                    st.markdown("---")
+    else:
+        # Main landing page
+        st.header("Welcome to the RAG Pipeline with Airflow")
+        st.markdown("""
+        This application lets you use a Retrieval-Augmented Generation (RAG) pipeline 
+        to query PDF documents or Nvidia's quarterly reports.
+        
+        ### Configuration Options:
+        
+        1. **Select your data source:**
+           - Upload your own PDF documents
+           - Query Nvidia quarterly reports from the past 5 years
+        
+        2. **Choose your PDF parsing method:**
+           - Basic Parser
+           - Docling
+           - Mistral OCR
+        
+        3. **Select RAG implementation:**
+           - Naive approach (Manual embeddings)
+           - Pinecone vector database
+           - ChromaDB vector database
+        
+        4. **Choose chunking strategy:**
+           - Fixed Size
+           - Semantic
+           - Recursive
+        
+        ### Get Started:
+        Configure your preferences in the sidebar and click "Apply Configuration".
+        """)
+        
+        # System architecture diagram (placeholder)
+        st.subheader("System Architecture")
+        st.markdown("""
+        ```
+        ┌─────────────┐    ┌─────────────┐    ┌─────────────┐
+        │  Streamlit  │───►│   FastAPI   │───►│   Airflow   │
+        │   (UI)      │◄───│  (Backend)  │◄───│  (Pipeline) │
+        └─────────────┘    └─────────────┘    └─────────────┘
+                                │                   │
+                                ▼                   ▼
+                           ┌─────────────┐    ┌─────────────┐
+                           │ LLM Service │    │ Vector DB   │
+                           │             │    │             │
+                           └─────────────┘    └─────────────┘
+        ```
+        """)

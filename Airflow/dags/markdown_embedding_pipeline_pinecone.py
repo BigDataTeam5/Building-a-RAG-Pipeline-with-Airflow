@@ -3,6 +3,7 @@ import tempfile
 import json
 from datetime import datetime, timedelta
 from airflow import DAG
+from utils.patching import *
 from airflow.operators.python import PythonOperator
 from airflow.sensors.external_task import ExternalTaskSensor
 from sentence_transformers import SentenceTransformer
@@ -12,7 +13,6 @@ import re
 import shutil
 from utils.chunking import KamradtModifiedChunker  # Assuming Kamradt chunking is available
 from pinecone import Pinecone, ServerlessSpec
-import pinecone
 import uuid
 
 # Load configuration
@@ -29,7 +29,7 @@ default_args = {
 
 # Combine all tasks into a single DAG
 dag = DAG(
-    "markdown_pipeline_dag",
+    "markdown_pipeline_pinecone",
     default_args=default_args,
     description="Download, process, and store markdown files with embeddings",
     schedule_interval='@daily',

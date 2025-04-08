@@ -32,6 +32,12 @@ from Rag_modelings.rag_pinecone import (
     process_document_with_chunking,
     load_data_to_pinecone
 )
+from Rag_modelings.rag_manual import (
+    process_document_with_chunking as manual_chunking,
+    query_memory_rag,
+    get_embedding as manual_get_embedding,
+    initialize_anthropic_client
+)
 
 
 # Initialize FastAPI app
@@ -74,6 +80,7 @@ class EmbeddingRequest(BaseModel):
     embedding_model: Optional[str] = "text-embedding-ada-002"
     similarity_metric: Optional[str] = "cosine"
     namespace: Optional[str] = None
+    data_source: Optional[str] = None
     
 class ManualEmbeddingRequest(BaseModel):
     text: str
@@ -230,30 +237,8 @@ async def process_rag_query_task(
         query_job_store[query_job_id]["status"] = "processing"
         
         result = None
-        
-        # Handle manual embeddings
-        if embedding_id and embedding_id in embedding_store:
-            embedding_data = embedding_store[embedding_id] 
-            chunks = embedding_data["chunks"]
-            
-            # Use LiteLLM to generate response directly
-            response = generate_response(
-                chunks=chunks,
-                query=query,
-                model_id=model_id,
-                metadata=[embedding_data["metadata"] for _ in chunks]
-            )
-            
-            result = {
-                "answer": response.get("answer", "Error generating response"),
-                "usage": response.get("usage", {}),
-                "source": f"Manual embedding (ID: {embedding_id})",
-                "chunks_used": len(chunks),
-                "status": "completed"
-            }
-        
         # Handle ChromaDB
-        elif rag_method.lower() == "chromadb":
+        if rag_method.lower() == "chromadb":
             api_logger.info(f"Processing ChromaDB query: {query}")
             result = chromadb_query(
                 query=query,
@@ -292,6 +277,46 @@ async def process_rag_query_task(
                 "namespace": response.get("namespace", None),
                 "status": "completed"
             }
+        # Add this case to the existing function where it handles different RAG methods
+        elif rag_method.lower() == "manual_embedding":
+            api_logger.info(f"Processing manual embedding query: {query}")
+            
+            # Initialize client for manual RAG
+            client = initialize_anthropic_client()
+            
+            # Use embedding_store if it exists, otherwise create a new one
+            if embedding_id and embedding_id in embedding_store:
+                embedding_data = embedding_store[embedding_id]
+                memory_store = [{
+                    "vector": manual_get_embedding(chunk, None),
+                    "metadata": {"text": chunk, "text_preview": chunk[:100]}
+                } for chunk in embedding_data["chunks"]]
+            else:
+                # For direct queries, create a simple memory store from the query itself
+                api_logger.info("No existing embedding found, creating simple context")
+                memory_store = [{
+                    "vector": manual_get_embedding("This is a direct query with no context.", None),
+                    "metadata": {
+                        "text": "This is a direct query with no context.", 
+                        "text_preview": "Direct query"
+                    }
+                }]
+            
+            # Use the query_memory_rag function from rag_manual.py
+            response = query_memory_rag(
+                query=query,
+                memory_store=memory_store,
+                client=client,
+                top_k=top_k
+            )
+            
+            result = {
+                "answer": response.get("answer", "Error generating response"),
+                "usage": {},  # Manual RAG doesn't track tokens currently
+                "source": f"Manual embedding (ID: {embedding_id or 'direct_query'})",
+                "chunks_used": len(memory_store),
+                "status": "completed"
+            }
         
         else:
             result = {
@@ -315,7 +340,7 @@ async def rag_query(request: QueryRequest, background_tasks: BackgroundTasks):
     """Query the RAG system using the specified method and model with background processing"""
     try:
         log_request(f"RAG Query: {request.query}, Method: {request.rag_method}, Model: {request.model_id}, DataSource: {request.data_source}")
-        
+        log_request(f"Quarters: {request.quarters}")
         # Create a job ID for this query
         query_job_id = str(uuid.uuid4())
         
@@ -374,7 +399,8 @@ async def process_embeddings(
     chunking_strategy: str,
     embedding_model: str = "all-MiniLM-L6-v2",
     similarity_metric: str = "cosine",
-    namespace: str = None
+    namespace: str = None,
+    data_source: str = None
 ):
     try:
         # Read markdown content
@@ -394,7 +420,9 @@ async def process_embeddings(
                 markdown_content,
                 chunking_strategy,
                 embedding_model=embedding_model,
-                source_info=source_info
+                source_info=source_info,
+                similarity_metric=similarity_metric,
+                data_source=data_source
             )
             
             # Update job status
@@ -475,6 +503,7 @@ async def create_embeddings(request: EmbeddingRequest, background_tasks: Backgro
         # Verify the markdown file exists
         markdown_path = request.markdown_path
         markdown_filename = request.markdown_filename
+        data_source = request.data_source
         # Create a job ID
         job_id = str(uuid.uuid4())
         similarity_metric = request.similarity_metric
@@ -500,7 +529,8 @@ async def create_embeddings(request: EmbeddingRequest, background_tasks: Backgro
             request.chunking_strategy,
             request.embedding_model,
             similarity_metric,
-            namespace
+            namespace,
+            data_source
         )
         
         return {
@@ -514,7 +544,7 @@ async def create_embeddings(request: EmbeddingRequest, background_tasks: Backgro
         log_error(f"Error creating embeddings", e)
         raise HTTPException(status_code=500, detail=str(e))
     
-@embedding_router.post("/manual-embedding",summary="Create embeddings from text provided directly by the user")
+@embedding_router.post("/manual-embedding", summary="Create embeddings from text provided directly by the user")
 async def create_manual_embedding(request: ManualEmbeddingRequest):
     """Create embeddings from text provided directly by the user"""
     try:
@@ -526,8 +556,8 @@ async def create_manual_embedding(request: ManualEmbeddingRequest):
             "timestamp": datetime.now().isoformat()
         }
         
-        # Apply chunking
-        chunks = process_document_with_chunking(request.text, request.chunking_strategy)
+        # Apply chunking using rag_manual's function
+        chunks = manual_chunking(request.text, request.chunking_strategy)
         
         # Store in embedding_store for later use
         embedding_store[request.embedding_id] = {

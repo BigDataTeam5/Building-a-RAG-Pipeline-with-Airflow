@@ -4,6 +4,14 @@ import numpy as np
 import os
 from sentence_transformers import SentenceTransformer
 import sys
+import shutil
+
+# NumPy 2.0+ compatibility for ChromaDB
+if hasattr(np, '__version__') and np.__version__.startswith('2.'):
+    np.float_ = np.float64
+    np.int_ = np.int64
+    np.uint = np.uint64
+    print("Applied NumPy 2.0 compatibility fixes for ChromaDB")
 
 # Add the project root to sys.path to import from other directories
 current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -11,32 +19,56 @@ project_root = os.path.dirname(current_dir)
 sys.path.append(project_root)
 
 # Import the response generator
-from Backend.litellm_query_generator import generate_response
+try:
+    from Backend.litellm_query_generator import generate_response
+except ImportError:
+    print("Warning: litellm_query_generator not found, response generation will be disabled")
+    generate_response = None
 
-CHROMA_DB_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), "chroma_db")
-client = chromadb.PersistentClient(path=CHROMA_DB_PATH)
+# Use the Docker copied database path instead of the local path
+CHROMA_DB_PATH = os.path.join(project_root, "docker_chroma_db")
+if not os.path.exists(CHROMA_DB_PATH):
+    # Fall back to the default path if the Docker copy doesn't exist
+    CHROMA_DB_PATH = os.path.join(project_root, "chroma_db")
+
+print(f"Using ChromaDB path: {CHROMA_DB_PATH}")
+
+# Initialize client with proper settings
+try:
+    client = chromadb.PersistentClient(
+        path=CHROMA_DB_PATH,
+        settings=chromadb.Settings(anonymized_telemetry=False)
+    )
+except Exception as e:
+    print(f"Error initializing ChromaDB client: {str(e)}")
+    client = None
 
 # Embedding model
 EMBEDDING_MODEL = "all-MiniLM-L6-v2"
 
 def get_available_collections():
+    if not client:
+        return None
+        
     try:
-        # Updated for ChromaDB v0.6.0
         collection_names = client.list_collections()
         if not collection_names:
             print("No collections found in the database.")
             return None
-        print(f"Available collections: {collection_names}")
+        print(f"Available collections: {[c.name for c in collection_names]}")
         return collection_names
     except Exception as e:
         print(f"Error listing collections: {str(e)}")
         return None
 
 def get_collection_info(collection_name="nvidia_embeddings"):
+    if not client:
+        return None, None
+        
     try:
         collection = client.get_collection(name=collection_name)
         # Get all documents to verify content
-        result = collection.get()
+        result = collection.get(limit=100)  # Get a reasonable sample
         print(f"\nCollection '{collection_name}' stats:")
         print(f"Total documents: {len(result['ids'])}")
         print(f"First few document IDs: {result['ids'][:5]}")
@@ -56,6 +88,9 @@ def test_nvidia_query(query="what is nvidia", quarters=["2022Q1", "2022Q4"]):
         query: The query to test
         quarters: List of quarters to filter by
     """
+    if not client:
+        return
+        
     try:
         # Initialize model and client
         model = SentenceTransformer(EMBEDDING_MODEL)
@@ -136,53 +171,54 @@ def test_nvidia_query(query="what is nvidia", quarters=["2022Q1", "2022Q4"]):
                 print(chunk[:200] + "..." if len(chunk) > 200 else chunk)
                 print(f"Metadata: {metadatas[i]}")
             
-            print("\n--- Generating response ---")
-            response = generate_response(
-                chunks=chunks,
-                query=query,
-                model_id="gpt4o",
-                metadata=metadatas
-            )
-            
-            print("\nFinal Answer:")
-            print(response.get("answer", "No answer generated"))
+            if generate_response:
+                print("\n--- Generating response ---")
+                response = generate_response(
+                    chunks=chunks,
+                    query=query,
+                    model_id="gpt4o",
+                    metadata=metadatas
+                )
+                
+                print("\nFinal Answer:")
+                print(response.get("answer", "No answer generated"))
+            else:
+                print("\nResponse generation disabled (litellm_query_generator not found)")
         else:
             print("\nNo matching documents found with the specified quarters.")
             
     except Exception as e:
         print(f"Error in test query: {str(e)}")
+        import traceback
+        traceback.print_exc()
 
-def calculate_similarity(collection, doc_id_1, doc_id_2):
-    """Calculate similarity between two documents in the collection"""
-    doc1_data = get_embedding_for_document(collection, doc_id_1)
-    doc2_data = get_embedding_for_document(collection, doc_id_2)
-    
-    if doc1_data and doc2_data:
-        # Calculate cosine similarity
-        embedding1 = np.array(doc1_data['embedding']).reshape(1, -1)
-        embedding2 = np.array(doc2_data['embedding']).reshape(1, -1)
-        similarity = cosine_similarity(embedding1, embedding2)[0][0]
-        return similarity, doc1_data, doc2_data
-    return None
-
-def get_embedding_for_document(collection, doc_id):
+def show_documents_in_collection(collection_name="nvidia_embeddings", limit=20):
+    """Display documents from the collection"""
+    if not client:
+        return
+        
     try:
-        # Include all data types in the query
-        result = collection.get(
-            ids=[doc_id],
-            include=['embeddings', 'documents', 'metadatas']
-        )
-        if result and len(result['embeddings']) > 0:
-            return {
-                'embedding': result['embeddings'][0],
-                'document': result['documents'][0],
-                'metadata': result['metadatas'][0] if result['metadatas'] else None
-            }
-        print(f"No data found for document ID: {doc_id}")
-        return None
+        collection = client.get_collection(name=collection_name)
+        result = collection.get(limit=limit)
+        
+        print(f"\n===== DISPLAYING {min(limit, len(result['ids']))} DOCUMENTS FROM {collection_name} =====")
+        
+        for i in range(min(limit, len(result['ids']))):
+            print(f"\n----- Document {i+1} -----")
+            print(f"ID: {result['ids'][i]}")
+            if result['metadatas'] and result['metadatas'][i]:
+                metadata = result['metadatas'][i]
+                print(f"Year: {metadata.get('Year', metadata.get('year', 'Unknown'))}")
+                print(f"Quarter: {metadata.get('Quarter', metadata.get('quarter', 'Unknown'))}")
+                print(f"Source: {metadata.get('source', 'Unknown')}")
+            
+            if result['documents'] and i < len(result['documents']):
+                doc = result['documents'][i]
+                preview = doc[:150] + "..." if len(doc) > 150 else doc
+                print(f"Text: {preview}")
+    
     except Exception as e:
-        print(f"Error retrieving data for {doc_id}: {str(e)}")
-        return None
+        print(f"Error displaying documents: {str(e)}")
 
 if __name__ == "__main__":
     print(f"Using ChromaDB path: {CHROMA_DB_PATH}")
@@ -194,10 +230,25 @@ if __name__ == "__main__":
         exit(1)
     
     # Get collection and its contents
-    collection, result = get_collection_info("nvidia_embeddings")
-    if not collection or not result:
-        print("Failed to access nvidia_embeddings collection.")
-        exit(1)
-    
-    # Test query with specific quarters
-    test_nvidia_query(query="what is nvidia revenue for year 2022 quarter 1", quarters=["2022Q1", "2022Q4"])
+    try:
+        collection_name = collection_names[0].name
+        print(f"Using collection: {collection_name}")
+        collection, result = get_collection_info(collection_name)
+        if not collection or not result:
+            print("Failed to access collection.")
+            exit(1)
+        
+        # Display some documents from the collection
+        show_documents_in_collection(collection_name, limit=10)
+        
+        # Ask if user wants to test a query
+        user_input = input("\nDo you want to test a query? (y/n): ")
+        if user_input.lower() == 'y':
+            query = input("Enter your query: ") or "what is nvidia revenue for year 2021 quarter 1"
+            quarters = input("Enter quarters to search (comma separated, e.g. 2021Q1,2021Q2): ") or "2021Q1"
+            quarters_list = [q.strip() for q in quarters.split(",")]
+            test_nvidia_query(query=query, quarters=quarters_list)
+    except Exception as e:
+        print(f"Error in main: {str(e)}")
+        import traceback
+        traceback.print_exc()
