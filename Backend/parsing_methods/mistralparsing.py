@@ -6,7 +6,7 @@ from mistralai import Mistral,DocumentURLChunk
 from dotenv import load_dotenv
 
 # Load the API key from the .env file
-load_dotenv(ovverride=True)
+load_dotenv(override=True)
 api_key = os.getenv("Mistral_API_KEY")
 client = Mistral(api_key=api_key)
 

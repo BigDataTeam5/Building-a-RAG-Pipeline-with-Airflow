@@ -44,12 +44,8 @@ services:
     ports:
       - "8000:8000"  
     volumes:
-      - ./Backend:/app
-      - ./chroma_db:/app/chroma_db
-      - ./uploads:/app/uploads
-      - ./user_markdowns:/app/user_markdowns
-      - ./Rag_modelings:/app/Rag_modelings
-      - ./.env:/app/.env
+    - .:/app
+    - ./chroma_db:/app/chroma_db
     networks:
       - app-network
     restart: always

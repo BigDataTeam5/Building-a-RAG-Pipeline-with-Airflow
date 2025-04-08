@@ -10,6 +10,7 @@ import shutil
 import sys
 import nltk
 import time
+from chromadb.utils import embedding_functions
 
 # from chunking_markdowns import chunk_document
 # Fix path handling for imports
@@ -376,17 +377,23 @@ def query_and_generate_response(
     Process a query using RAG with ChromaDB backend
     """
     try:
-        # Set up ChromaDB client
-        CHROMA_DB_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), "chroma_db")
+        CHROMA_DB_PATH = "/app/chroma_db"  # This should match the volume mount path
+        print(f"Using ChromaDB path: {CHROMA_DB_PATH}")
         client = chromadb.PersistentClient(path=CHROMA_DB_PATH)
         
-        # Determine which collection to use
+        # Determine which collection to use - Use exact name from Airflow DAG
         collection_name = "nvidia_embeddings" if data_source == "Nvidia Dataset" else "user_pdf_embeddings"
         print(f"Using collection: {collection_name} for data source: {data_source}")
         
         # Get collection with proper error handling
         try:
-            collection = client.get_collection(name=collection_name)
+            # IMPORTANT: Use the same embedding function as in the Airflow DAG
+            ef = embedding_functions.DefaultEmbeddingFunction()
+            collection = client.get_collection(
+                name=collection_name,
+                embedding_function=ef  # This is the key fix
+            )
+           
         except Exception as e:
             print(f"Error getting collection {collection_name}: {str(e)}")
             return {
