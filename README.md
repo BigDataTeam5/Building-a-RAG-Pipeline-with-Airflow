@@ -57,4 +57,37 @@ The goal is to build a scalable, modular system that extracts insights from **NV
 ---
 
 ## 📂 Project Structure
+📦 Building-a-RAG-Pipeline-with-Airflow/
+├── 📂 Airflow/
+│   ├── 📂 dags/
+│   ├── 📂 logs/
+│   ├── 📂 config/
+│   ├── 📂 plugins/
+│   └── 📄 Dockerfile
+├── 📂 Backend/
+│   ├── 📄 __init__.py
+│   ├── 📄 main.py
+│   ├── 📄 api.py
+│   ├── 📄 logger.py
+│   ├── 📄 litellm_query_generator.py
+│   ├── 📂 parsing_methods/
+│   │   ├── 📄 __init__.py
+│   │   ├── 📄 doclingparsing.py
+│   │   ├── 📄 mistralparsing.py
+│   │   └── 📄 mistralparsing_userpdf.py
+│   └── 📄 Dockerfile
+├── 📂 Rag_modelings/
+│   ├── 📄 __init__.py
+│   ├── 📄 chromadb_pipeline.py
+│   ├── 📄 rag_pinecone.py
+│   └── 📄 rag_manual.py
+├── 📂 uploads/
+├── 📂 user_markdowns/
+├── 📂 chroma_db/
+├── 📂 chunk_storage/
+├── 📂 local_vector.db/
+├── 📄 docker-compose.yml
+├── 📄 pyproject.toml
+├── 📄 poetry.lock
+└── 📄 .env
 
