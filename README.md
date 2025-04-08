@@ -57,6 +57,7 @@ The goal is to build a scalable, modular system that extracts insights from **NV
 ---
 
 ## 📂 Project Structure
+```
 📦 Building-a-RAG-Pipeline-with-Airflow/
 ├── 📂 Airflow/
 │   ├── 📂 dags/
@@ -90,4 +91,4 @@ The goal is to build a scalable, modular system that extracts insights from **NV
 ├── 📄 pyproject.toml
 ├── 📄 poetry.lock
 └── 📄 .env
-
+```
