@@ -5,7 +5,7 @@ ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
 ENV PYTHONPATH=/app
 
-# Install system packages: dos2unix (for line ending fixes), curl (to install Poetry)
+# Install system packages
 RUN apt-get update && apt-get install -y --no-install-recommends \
     dos2unix \
     curl \
@@ -19,7 +19,7 @@ ENV PATH="/root/.local/bin:$PATH"
 
 RUN poetry config virtualenvs.create false
 
-# Set our working directory
+# Set working directory
 WORKDIR /app
 
 # Copy project configuration files from root
@@ -40,8 +40,13 @@ COPY Airflow/ /app/Airflow/
 COPY Rag_modelings/ /app/Rag_modelings/
 COPY .env /app/.env
 
+# Add entrypoint script
+COPY Backend/entrypoint.sh /app/entrypoint.sh
+RUN chmod +x /app/entrypoint.sh
+RUN dos2unix /app/entrypoint.sh
+
 # Convert line endings
 RUN find /app -name "*.py" -exec dos2unix {} \;
 
-# Change the CMD to use the correct path
-CMD ["python", "-m", "uvicorn", "Backend.api:app", "--host", "0.0.0.0", "--port", "8000"]
+# Use entrypoint script
+CMD ["/app/entrypoint.sh"]

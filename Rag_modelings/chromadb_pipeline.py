@@ -368,7 +368,7 @@ def query_and_generate_response(
     query: str,
     similarity_metric: str = "cosine",
     embedding_model_name: str = "all-MiniLM-L6-v2",
-    llm_model: str = "gpt4o",
+    llm_model: str = "gpt-3.5-turbo",
     top_k: int = 5,
     data_source: str = None,
     quarters: List[str] = None
@@ -377,169 +377,82 @@ def query_and_generate_response(
     Process a query using RAG with ChromaDB backend
     """
     try:
-        CHROMA_DB_PATH = "/app/chroma_db"  # This should match the volume mount path
+        # Use local development path
+        CHROMA_DB_PATH = "/opt/airflow/chroma_db"
         print(f"Using ChromaDB path: {CHROMA_DB_PATH}")
+        
+        # Ensure directory exists
+        os.makedirs(CHROMA_DB_PATH, exist_ok=True)
+        
         client = chromadb.PersistentClient(path=CHROMA_DB_PATH)
         
-        # Determine which collection to use - Use exact name from Airflow DAG
-        collection_name = "nvidia_embeddings" if data_source == "Nvidia Dataset" else "user_pdf_embeddings"
-        print(f"Using collection: {collection_name} for data source: {data_source}")
+        # Generate collection name based on data source
+        collection_name = get_collection_name(data_source, similarity_metric)
+        print(f"Accessing collection: {collection_name}")
         
-        # Get collection with proper error handling
+        # Try to get collection with proper error handling
         try:
-            # IMPORTANT: Use the same embedding function as in the Airflow DAG
             ef = embedding_functions.DefaultEmbeddingFunction()
             collection = client.get_collection(
                 name=collection_name,
-                embedding_function=ef  # This is the key fix
+                embedding_function=ef
             )
-           
+            print(f"Successfully accessed collection: {collection_name}")
+            
+            # Generate query embedding
+            query_embedding = ef([query])[0]
+            
+            # Build filter for quarters if provided
+            where_filter = None
+            if quarters and len(quarters) > 0:
+                where_conditions = []
+                for quarter_str in quarters:
+                    if len(quarter_str) >= 5:
+                        year = quarter_str[:4]
+                        quarter = f"Q{quarter_str[4]}"
+                        where_conditions.append({
+                            "$and": [
+                                {"year": year},
+                                {"quarter": quarter}
+                            ]
+                        })
+                if len(where_conditions) == 1:
+                    where_filter = where_conditions[0]
+                elif len(where_conditions) > 1:
+                    where_filter = {"$or": where_conditions}
+            
+            # Query the collection
+            results = collection.query(
+                query_embeddings=[query_embedding],
+                n_results=top_k,
+                where=where_filter,
+                include=["documents", "metadatas", "distances"]
+            )
+            
+            return {
+                "response": "Query successful",
+                "chunks_retrieved": len(results['documents'][0]),
+                "documents": results['documents'][0],
+                "metadatas": results['metadatas'][0],
+                "distances": results['distances'][0]
+            }
+            
         except Exception as e:
-            print(f"Error getting collection {collection_name}: {str(e)}")
+            print(f"Error accessing collection {collection_name}: {str(e)}")
             return {
-                "response": f"Error: Collection {collection_name} not found. Please check your data source selection.",
+                "response": f"Error: Collection {collection_name} could not be accessed. {str(e)}",
                 "chunks_retrieved": 0,
                 "sources": []
             }
             
-        # Initialize embedding model
-        model = SentenceTransformer(embedding_model_name)
-        
-        # Generate query embedding
-        query_embedding = model.encode(query).tolist()
-        
-        # Debug: Print selected quarters
-        print(f"Selected quarters from UI: {quarters}")
-        
-        # Build where clause for filtering if using Nvidia dataset and quarters are specified
-        where_conditions = None
-        if data_source == "Nvidia Dataset" and quarters:
-            # First query a sample to determine field names
-            sample_results = collection.query(
-                query_embeddings=[query_embedding],
-                n_results=1,
-                include=["metadatas"]
-            )
-            
-            # Auto-detect field names from actual metadata
-            metadata_sample = {}
-            if sample_results["metadatas"] and len(sample_results["metadatas"]) > 0 and len(sample_results["metadatas"][0]) > 0:
-                metadata_sample = sample_results["metadatas"][0][0]
-                print(f"Sample metadata from ChromaDB: {metadata_sample}")
-            
-            # Detect correct field names (handle both upper and lowercase keys)
-            year_field = "Year" if "Year" in metadata_sample else "year"
-            quarter_field = "Quarter" if "Quarter" in metadata_sample else "quarter"
-            print(f"Using metadata fields: {year_field} and {quarter_field}")
-            
-            # Normalize quarters and build where conditions
-            where_conditions = []
-            for quarter_str in quarters:
-                # Normalize quarter format (handle both 2023Q3 and 2023q3 formats)
-                quarter_str = quarter_str.upper().replace('-', '')
-                
-                if 'Q' in quarter_str:
-                    year, quarter = quarter_str.split('Q')
-                    quarter = f"Q{quarter}"  # Make sure quarter has Q prefix
-                else:
-                    year = quarter_str[:4]
-                    quarter = f"Q{quarter_str[4:]}"
-                
-                print(f"Adding filter for {year_field}={year}, {quarter_field}={quarter}")
-                
-                # Use the correct field names in the filter
-                where_conditions.append({
-                    "$and": [
-                        {year_field: year},
-                        {quarter_field: quarter}
-                    ]
-                })
-            
-            # Combine with OR for any quarter match
-            if where_conditions:
-                where_conditions = {"$or": where_conditions}
-                print(f"Applying multi-filter: {where_conditions}")
-        
-        # Execute query with or without filters
-        if where_conditions:
-            result = collection.query(
-                query_embeddings=[query_embedding],
-                n_results=top_k,
-                where=where_conditions,
-                include=["documents", "metadatas", "distances"]
-            )
-        else:
-            result = collection.query(
-                query_embeddings=[query_embedding],
-                n_results=top_k,
-                include=["documents", "metadatas", "distances"]
-            )
-        
-        # Check if we have results
-        if not result["documents"] or not result["documents"][0]:
-            no_results_msg = "No relevant information found."
-            if quarters:
-                quarters_str = ", ".join(quarters)
-                no_results_msg += f" Try selecting different quarters (current selection: {quarters_str})."
-            
-            return {
-                "response": no_results_msg,
-                "chunks_retrieved": 0,
-                "sources": []
-            }
-        
-        # Process retrieved chunks
-        chunks = result["documents"][0]
-        metadatas = result["metadatas"][0] if result["metadatas"] else []
-        
-        # Generate response with LLM
-        chunk_context = "\n\n".join([f"CHUNK {i+1}:\n{chunk}" for i, chunk in enumerate(chunks)])
-        
-        # Use LiteLLM or another method to generate the response
-        prompt = f"""Answer the question based ONLY on the following context:
-
-{chunk_context}
-
-Question: {query}
-        
-Provide a comprehensive answer using the information in the context. If the context doesn't contain relevant information, simply state "I don't have enough information to answer this question."
-"""
-        
-        # Generate response using your preferred LLM method
-        response_content, token_usage = generate_response(prompt, model_id=llm_model)
-        
-        # Compile source information
-        sources = []
-        for i, metadata in enumerate(metadatas):
-            source = {
-                "text": chunks[i][:150] + "..." if len(chunks[i]) > 150 else chunks[i],
-                "file": metadata.get("file_name", "Unknown"),
-                "year": metadata.get("year", metadata.get("Year", "Unknown")),
-                "quarter": metadata.get("quarter", metadata.get("Quarter", "Unknown")),
-            }
-            sources.append(source)
-        
-        # Prepare final response
-        result = {
-            "response": response_content,
-            "chunks_retrieved": len(chunks),
-            "sources": sources,
-            "token_usage": token_usage,
-            "collection_used": collection_name
-        }
-        
-        return result
-        
     except Exception as e:
-        print(f"Error in RAG pipeline: {e}")
-        import traceback
-        traceback.print_exc()
+        print(f"Error in RAG pipeline: {str(e)}")
         return {
-            "response": f"Error processing your query: {str(e)}",
+            "response": f"Error: RAG pipeline failed. {str(e)}",
             "chunks_retrieved": 0,
             "sources": []
-        }
-        
+        }    
+
 # For testing
 if __name__ == "__main__":
     import argparse

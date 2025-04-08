@@ -44,8 +44,13 @@ services:
     ports:
       - "8000:8000"  
     volumes:
-    - .:/app
-    - ./chroma_db:/app/chroma_db
+      - ./Backend:/app/Backend
+      - ./Airflow:/app/Airflow
+      - ./chroma_db:/opt/airflow/chroma_db
+      - ./uploads:/app/uploads
+      - ./user_markdowns:/app/user_markdowns
+      - ./Rag_modelings:/app/Rag_modelings
+      - ./.env:/app/.env
     networks:
       - app-network
     restart: always
@@ -64,6 +69,8 @@ services:
       POSTGRES_DB: airflow
     volumes:
       - postgres-db-volume:/var/lib/postgresql/data
+    networks:
+      - app-network
     healthcheck:
       test: ["CMD", "pg_isready", "-U", "airflow"]
       interval: 10s
@@ -83,6 +90,8 @@ services:
       retries: 50
       start_period: 30s
     restart: always
+    networks:
+      - app-network
 
   airflow-webserver:
     <<: *airflow-common

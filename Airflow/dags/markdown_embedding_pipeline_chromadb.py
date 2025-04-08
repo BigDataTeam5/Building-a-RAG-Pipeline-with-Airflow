@@ -180,9 +180,14 @@ def kamradt_chunking(**context):
             print(f"Error chunking file {file_path}: {str(e)}")
     
     ti.xcom_push(key='all_chunks_info', value=all_chunks_info)
+# In markdown_embedding_pipeline_chromadb.py
 def process_chunks_to_chromadb(**context):
     ti = context['ti']
     all_chunks_info = ti.xcom_pull(key='all_chunks_info', task_ids='kamradt_chunking')
+    
+    print("Starting ChromaDB processing...")
+    print(f"Got {len(all_chunks_info) if all_chunks_info else 0} files to process")
+    
     if not all_chunks_info:
         print("No chunks found to process.")
         return "No chunks to process"
@@ -196,13 +201,13 @@ def process_chunks_to_chromadb(**context):
     # Ensure directory exists with proper permissions
     try:
         os.makedirs(CHROMA_DB_PATH, exist_ok=True)
-        # Set permissions on the directory to ensure it's writable
         os.chmod(CHROMA_DB_PATH, 0o777)
-        print(f"Ensured ChromaDB directory exists with write permissions: {CHROMA_DB_PATH}")
+        print(f"Created/updated ChromaDB directory: {CHROMA_DB_PATH}")
     except Exception as e:
         print(f"Error setting up ChromaDB directory: {str(e)}")
+        raise
     
-    # Initialize client with settings
+    # Initialize client with explicit settings
     try:
         client = chromadb.PersistentClient(
             path=CHROMA_DB_PATH,
@@ -211,33 +216,21 @@ def process_chunks_to_chromadb(**context):
                 allow_reset=True
             )
         )
+        print("Successfully initialized ChromaDB client")
     except Exception as e:
         print(f"Error initializing ChromaDB client: {str(e)}")
-        return f"Failed to initialize ChromaDB client: {str(e)}"
-    
-    # Delete existing collection if it exists (instead of removing the directory)
-    max_attempts = 3
-    for attempt in range(1, max_attempts + 1):
-        try:
-            try:
-                # Try to get and delete the collection
-                collection = client.get_collection(name="nvidia_embeddings")
-                client.delete_collection(name="nvidia_embeddings")
-                print(f"Deleted existing collection on attempt {attempt}")
-                break
-            except Exception as e:
-                print(f"No existing collection to delete or error: {str(e)}")
-                print(f"Attempt {attempt}/{max_attempts} failed: {str(e)}")
-                time.sleep(3)  # Wait a bit before retrying
-        except Exception as e:
-            print(f"Error during collection deletion attempt {attempt}: {str(e)}")
-    
+        raise
+
     # Create new collection
     try:
-        # Add a small delay to ensure deletion is complete
-        time.sleep(2)
+        # Delete existing collection if it exists
+        try:
+            client.delete_collection("nvidia_embeddings")
+            print("Deleted existing collection")
+        except Exception as e:
+            print(f"No existing collection to delete: {str(e)}")
         
-        # Create fresh collection with proper settings
+        # Create fresh collection
         collection = client.create_collection(
             name="nvidia_embeddings",
             embedding_function=ef,
@@ -245,72 +238,46 @@ def process_chunks_to_chromadb(**context):
         )
         print("Successfully created new collection")
     except Exception as e:
-        print(f"Failed to create collection: {str(e)}")
-        return "Failed to create collection"
-    
+        print(f"Error creating collection: {str(e)}")
+        raise
+
     # Process chunks for each file
     total_chunks_processed = 0
-    
     for file_info in all_chunks_info:
-        year = file_info['year']
-        quarter = file_info['quarter']
         chunks = file_info['chunks']
-        file_name = file_info['file_name']
+        print(f"Processing {len(chunks)} chunks for file {file_info['file_name']}")
         
         try:
-            # Add chunks in smaller batches to avoid timeouts
+            # Add chunks in smaller batches
             batch_size = 50
             for i in range(0, len(chunks), batch_size):
                 batch_chunks = chunks[i:i+batch_size]
-                ids = [f"{file_name}_{i+j}" for j in range(len(batch_chunks))]
-                metadatas = [
+                batch_ids = [f"{file_info['file_name']}_{i+j}" for j in range(len(batch_chunks))]
+                batch_metadatas = [
                     {
-                        "year": year,
-                        "quarter": quarter,
+                        "year": file_info['year'],
+                        "quarter": file_info['quarter'],
                         "source": file_info['s3_file_path'],
-                        "file_name": file_name,
+                        "file_name": file_info['file_name'],
                         "chunk_index": i+j
                     }
                     for j in range(len(batch_chunks))
                 ]
                 
-                # Add with retry logic
-                max_retries = 3
-                for retry in range(max_retries):
-                    try:
-                        collection.add(
-                            ids=ids,
-                            documents=batch_chunks,
-                            metadatas=metadatas
-                        )
-                        break  # If successful, break retry loop
-                    except Exception as e:
-                        if retry < max_retries - 1:
-                            print(f"Error adding batch (retry {retry+1}/{max_retries}): {str(e)}")
-                            time.sleep(1)  # Wait before retrying
-                        else:
-                            raise  # Re-raise on last attempt
+                print(f"Adding batch {i//batch_size + 1}/{(len(chunks)-1)//batch_size + 1}")
+                collection.add(
+                    ids=batch_ids,
+                    documents=batch_chunks,
+                    metadatas=batch_metadatas
+                )
+                total_chunks_processed += len(batch_chunks)
                 
-                print(f"Added batch {i//batch_size + 1}/{(len(chunks)-1)//batch_size + 1} for {file_name}")
-            
-            total_chunks_processed += len(chunks)
-            print(f"Processed and stored {len(chunks)} chunks for {file_name}")
         except Exception as e:
-            print(f"Error processing chunks for {file_name}: {str(e)}")
-    
-    ti.xcom_push(key='total_chunks_processed', value=total_chunks_processed)
-    
-    # Cleanup temp directory
-    temp_dir = ti.xcom_pull(key='temp_directory', task_ids='list_and_download_markdown_files')
-    if temp_dir and os.path.exists(temp_dir):
-        try:
-            shutil.rmtree(temp_dir)
-            print(f"Cleaned up temporary directory: {temp_dir}")
-        except Exception as e:
-            print(f"Error cleaning up temporary directory: {str(e)}")
-    
-    return "Processing complete"
+            print(f"Error processing file {file_info['file_name']}: {str(e)}")
+            continue
 
+    print(f"Successfully processed {total_chunks_processed} total chunks")
+    return f"Processed {total_chunks_processed} chunks"
 
 def display_first_embeddings(**context):
     CHROMA_DB_PATH = config['CHROMA_DB_PATH']
