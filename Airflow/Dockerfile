@@ -62,5 +62,9 @@ COPY --chown=airflow:root Airflow/requirements.txt /tmp/requirements.txt
 RUN grep -v "huggingface-hub\|sentence-transformers\|transformers\|safetensors\|accelerate" /tmp/requirements.txt > /tmp/filtered_requirements.txt
 RUN pip install --no-cache-dir -r /tmp/filtered_requirements.txt
 
+RUN pip uninstall -y huggingface-hub sentence-transformers && \
+    pip install huggingface-hub==0.16.4 sentence-transformers==2.2.2
+
+
 # Stay as airflow user
 USER airflow
