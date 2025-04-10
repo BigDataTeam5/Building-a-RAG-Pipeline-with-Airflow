@@ -10,7 +10,7 @@ torch>=2.0.0
 numpy
 chromadb==0.4.22
 pinecone>=2.0.0
-huggingface-hub==0.16.4
+huggingface-hub>=0.20.0
 sentence-transformers==2.2.2
 transformers==4.36.2
 langchain-text-splitters
