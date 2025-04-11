@@ -61,11 +61,24 @@ app.add_middleware(
 )
 
 # Storage paths
-UPLOAD_DIR = "uploads"
-MARKDOWN_DIR = "user_markdowns"
-os.makedirs(UPLOAD_DIR, exist_ok=True)
-os.makedirs(MARKDOWN_DIR, exist_ok=True)
-
+BASE_DIR = "/app"  # for VM deployment
+UPLOAD_DIR = os.path.join(BASE_DIR, "uploads")
+MARKDOWN_DIR = os.path.join(BASE_DIR, "user_markdowns")
+# Create directories with proper error handling and permissions
+try:
+    # Create directories if they don't exist
+    os.makedirs(UPLOAD_DIR, exist_ok=True)
+    os.makedirs(MARKDOWN_DIR, exist_ok=True)
+    
+    # Set proper permissions (readable/writable by all)
+    os.chmod(UPLOAD_DIR, 0o777)
+    os.chmod(MARKDOWN_DIR, 0o777)
+    
+    print(f"Successfully created and set permissions for directories:")
+    print(f"UPLOAD_DIR: {UPLOAD_DIR}")
+    print(f"MARKDOWN_DIR: {MARKDOWN_DIR}")
+except Exception as e:
+    print(f"Error setting up directories: {str(e)}")
 # In-memory storage
 job_store = {}
 query_job_store = {}
