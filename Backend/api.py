@@ -149,10 +149,11 @@ async def upload_pdf(
         temp_file_path = temp_file.name
         temp_file.write(await file.read())
         temp_file.close()  # Close the file so it can be read by the parsers
-
+        os.makedirs(MARKDOWN_DIR, exist_ok=True)
         # Generate the markdown path
         markdown_filename = os.path.splitext(filename)[0] + ".md"
         markdown_path = os.path.join(MARKDOWN_DIR, f"{file_id}_{markdown_filename}")
+        os.makedirs(os.path.dirname(markdown_path), exist_ok=True)
 
         # Parse the PDF
         if parser.lower() == "docling":

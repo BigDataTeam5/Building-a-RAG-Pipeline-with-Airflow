@@ -799,7 +799,14 @@ else:  # current_page == "main" or any other value
                                 try:
                                     with open(markdown_path, "r", encoding="utf-8") as f:
                                         markdown_content = f.read()
-                                    
+                                    try:
+                                        with open(markdown_path, "r", encoding="utf-8") as f:
+                                            markdown_content = f.read()
+                                    except FileNotFoundError:
+                                        st.error(f"File not found: {markdown_path}")
+                                        st.info("Please upload a PDF file first")
+                                        st.stop()
+
                                     # Create a unique ID for this manual embedding
                                     embedding_id = f"manual_{file_id}"
                                     
