@@ -92,6 +92,6 @@ The goal is to build a scalable, modular system that extracts insights from **NV
 └── 📄 .env
 ```
 ## Deployed Links:
-- airflow pipeline = http://34.29.103.5:8080/
-- fastapi = http://34.29.103.5:8000/docs
+- airflow pipeline = http://34.28.224.91:8080/
+- fastapi = http://34.28.224.91:8000/docs
 - streamlit = https://rag-llm-pipelines.streamlit.app/
