@@ -95,3 +95,4 @@ The goal is to build a scalable, modular system that extracts insights from **NV
 - airflow pipeline = http://35.224.2.133:8080/docs
 - fastapi = http://35.224.2.133:8000/docs
 - streamlit = https://rag-llm-pipelines.streamlit.app/
+- Google Codelabs = https://codelabs-preview.appspot.com/?file_id=1FQ1l6-_82iIJGELg1N5bqvxTEUn3tmiW7c4I_f8xYzo#0
