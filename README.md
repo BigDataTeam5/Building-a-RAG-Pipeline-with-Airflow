@@ -1,4 +1,4 @@
-# 📘 Building a RAG Pipeline with Airflow
+# 📘 Building a RAG Pipeline with Airflow 
 
 We are enhancing the **LLM Extractor Project** in this organization to implement **Retrieval-Augmented Generation (RAG)** concepts for reducing input tokens and improving efficiency.
 
